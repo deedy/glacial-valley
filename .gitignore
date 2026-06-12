@@ -11,3 +11,4 @@ chrome.log
 node_modules/
 __pycache__/
 .DS_Store
+s_*.png
