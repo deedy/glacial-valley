@@ -21,7 +21,7 @@
 </head>
 <body>
 <div id="load"><div id="loadmsg">forming the valley…</div><div class="bar"><i id="loadbar"></i></div></div>
-<div id="hint">mouse looks — hold cursor at a screen edge to keep turning &nbsp;·&nbsp; WASD move &nbsp;·&nbsp; shift sprint &nbsp;·&nbsp; space jump</div>
+<div id="hint">mouse looks — hold cursor at a screen edge to keep turning &nbsp;·&nbsp; WASD move &nbsp;·&nbsp; shift sprint &nbsp;·&nbsp; space jump &nbsp;·&nbsp; P pauses the seasons</div>
 <div id="err"></div>
 <script>
 window.addEventListener('error', e => {
@@ -31,6 +31,6 @@ window.addEventListener('unhandledrejection', e => {
   document.getElementById('err').textContent += 'promise: ' + (e.reason && e.reason.message || e.reason) + '\n';
 });
 </script>
-<script type="module" src="./main.js?v=2"></script>
+<script type="module" src="./main.js?v=3"></script>
 </body>
 </html>

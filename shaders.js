@@ -9,12 +9,18 @@ uniform vec3  uSkyZenith;
 uniform vec3  uHorizonCold;
 uniform vec3  uHorizonWarm;
 uniform vec3  uGroundBounce;
-uniform sampler2D uMapCoarse;   // R: terrain height (m), G: baked sun visibility
+uniform sampler2D uMapCoarse;   // R: height, G: morning sun vis, B: evening sun vis
 uniform sampler2D uMapFine;
 uniform vec3  uRegCoarse;       // center x, center z, half extent
 uniform vec3  uRegFine;
 uniform float uWaterY;
 uniform vec2  uWindDir;
+uniform vec2  uVisW;            // morning / evening shadow-map weights (noon → 0,0 = unshadowed)
+uniform float uSeasonT;         // 0 winter → 1 spring → 2 summer → 3 autumn → 4 winter
+uniform float uGreen;           // lushness 0..1
+uniform float uAutumn;          // autumn coloring 0..1
+uniform float uBloom;           // wildflower bloom factor
+uniform float uSnowUp;          // how far the snowline has retreated uphill (m)
 
 float hash12(vec2 p){
   vec3 p3 = fract(vec3(p.xyx) * 0.1031);
@@ -80,11 +86,14 @@ float groundH(vec2 xz){
   float hf = texture2D(uMapFine,   clamp(uvf, 0.0, 1.0)).r;
   return mix(mix(0.0, hc, mc), hf, mf);
 }
+float visFrom(vec4 t){
+  return t.g*uVisW.x + t.b*uVisW.y + max(1.0 - uVisW.x - uVisW.y, 0.0);
+}
 float sunVis(vec2 xz){
   vec2 uvf = mapUV(uRegFine, xz);   float mf = regionMask(uvf);
   vec2 uvc = mapUV(uRegCoarse, xz); float mc = regionMask(uvc);
-  float vc = texture2D(uMapCoarse, clamp(uvc, 0.0, 1.0)).g;
-  float vf = texture2D(uMapFine,   clamp(uvf, 0.0, 1.0)).g;
+  float vc = visFrom(texture2D(uMapCoarse, clamp(uvc, 0.0, 1.0)));
+  float vf = visFrom(texture2D(uMapFine,   clamp(uvf, 0.0, 1.0)));
   return mix(mix(1.0, vc, mc), vf*vc, mf);
 }
 float cloudShadow(vec2 xz){
@@ -94,6 +103,30 @@ float cloudShadow(vec2 xz){
 float gust(vec2 xz){
   return fbm3(xz*0.05 - uWindDir*uTime*0.85);
 }
+vec3 starLayer(vec2 uv, float cells, float thresh, float gain){
+  vec2 p = uv*cells;
+  vec2 i = floor(p);
+  float h = hash12(i);
+  if (h <= thresh) return vec3(0.0);
+  vec2 sp = 0.15 + 0.7*hash22(i + 11.0);
+  float d = length(fract(p) - sp);
+  float tw = 0.78 + 0.22*sin(uTime*(1.5 + h*5.0) + h*73.0);
+  float b = (h - thresh)/(1.0 - thresh);
+  vec3 tint = mix(vec3(1.0, 0.85, 0.70), vec3(0.72, 0.83, 1.0), hash12(i + 5.0));
+  return tint * gain * b * exp(-d*d*260.0) * tw;
+}
+vec3 starField(vec3 d){
+  vec3 a = d / (abs(d.x) + abs(d.y) + abs(d.z) + 1e-5);
+  vec2 uv = a.xz;
+  vec3 col = starLayer(uv, 150.0, 0.90, 0.55);
+  col += starLayer(uv + 7.3, 150.0, 0.88, 0.40);
+  col += starLayer(uv, 55.0, 0.952, 2.8);
+  float band = exp(-pow(dot(d, normalize(vec3(0.45, 0.35, 0.82)))*3.0, 2.0));
+  float cl = fbm(uv*6.0 + 3.0);
+  float lanes = smoothstep(0.25, 0.55, fbm(uv*11.0 + 31.0));
+  col += vec3(0.50, 0.60, 0.85) * band * (0.04 + 0.18*pow(cl, 1.6)) * (0.35 + 0.65*lanes);
+  return col;
+}
 vec3 skyRadiance(vec3 d){
   float sd = max(dot(d, uSunDir), 0.0);
   float y = d.y;
@@ -102,9 +135,13 @@ vec3 skyRadiance(vec3 d){
   vec3 horizon = mix(uHorizonCold, uHorizonWarm, warmside);
   vec3 col = mix(uSkyZenith, horizon, hz);
   col += uHorizonWarm * (pow(sd, 8.0)*0.12 + pow(sd, 64.0)*0.5);
-  float disk = smoothstep(0.99988, 0.99997, sd);
+  float disk = smoothstep(0.99988, 0.99997, sd) * smoothstep(-0.03, 0.01, uSunDir.y);
   col += vec3(1.0, 0.60, 0.34) * disk * 160.0;
-  col += vec3(1.0, 0.55, 0.30) * pow(sd, 900.0) * 7.0;
+  col += vec3(1.0, 0.55, 0.30) * pow(sd, 900.0) * 7.0 * smoothstep(-0.05, 0.02, uSunDir.y);
+  float nightF = clamp((0.02 - uSunDir.y)*9.0, 0.0, 1.0);
+  if (nightF > 0.002 && y > 0.0){
+    col += starField(d) * nightF * smoothstep(0.0, 0.12, y) * 0.85;
+  }
   col = mix(col, uHorizonCold*0.65, smoothstep(0.0, -0.10, y));
   if (y > 0.012){
     vec2 cp = d.xz / (y + 0.09);
@@ -221,7 +258,7 @@ void main(){
                * smoothstep(0.30, 0.9, relH) * (1.0 - smoothstep(35.0, 80.0, relH))
                * smoothstep(0.33, 0.6, fbm(vWp.xz*0.045 + 7.0));
 
-  float snowLine = 1050.0 + 500.0*(fbm(vWp.xz*0.0011) - 0.5);
+  float snowLine = 1050.0 + uSnowUp + 500.0*(fbm(vWp.xz*0.0011) - 0.5);
   float snowM = smoothstep(snowLine, snowLine + 180.0, relH);
   snowM *= smoothstep(0.60, 0.28, slope + (fbm(vWp.xz*0.02 + 3.0) - 0.5)*0.25);
   snowM *= 0.55 + 0.45*smoothstep(0.30, 0.55, fbm(vWp.xz*0.006 + 11.0));
@@ -247,6 +284,11 @@ void main(){
   float gn = vnoise(uvw*3.0);
   vec3 grassCol = mix(vec3(0.085, 0.115, 0.045), vec3(0.21, 0.19, 0.085), gn);
   grassCol = mix(grassCol, vec3(0.27, 0.235, 0.12), smoothstep(0.6, 0.85, fbm(uvw*0.6))*0.6);
+  // seasons: lush green in summer, russet and gold in autumn
+  vec3 lushCol = mix(vec3(0.055, 0.155, 0.030), vec3(0.115, 0.225, 0.055), gn);
+  grassCol = mix(grassCol, lushCol, uGreen);
+  vec3 fallCol = mix(vec3(0.33, 0.21, 0.06), vec3(0.46, 0.30, 0.10), gn);
+  grassCol = mix(grassCol, fallCol, uAutumn);
 
   float mossM = smoothstep(1.2, 0.3, relH) * smoothstep(0.62, 0.82, fbm(uvw*0.9 + 4.0)) * (1.0 - siltM*0.6);
   vec3 mossCol = vec3(0.075, 0.16, 0.055);
@@ -444,6 +486,7 @@ varying float vHue;
 varying float vG;
 void main(){
   float scale = aParam.x, yaw = aParam.y, phase = aParam.z;
+  scale *= 1.0 + 0.45*uGreen;     // lusher, taller in summer
   vHue = aParam.w;
   float cy = cos(yaw), sy = sin(yaw);
   vec3 lp = vec3(position.x*cy, position.y, -position.x*sy);
@@ -483,8 +526,10 @@ void main(){
   if (!gl_FrontFacing) N = -N;
   N = normalize(mix(N, vec3(0.0, 1.0, 0.0), 0.4));
 
-  vec3 colA = vec3(0.10, 0.14, 0.05);
-  vec3 colB = vec3(0.24, 0.21, 0.09);
+  vec3 colA = mix(vec3(0.10, 0.14, 0.05), vec3(0.05, 0.17, 0.03), uGreen);
+  colA = mix(colA, vec3(0.30, 0.18, 0.05), uAutumn);
+  vec3 colB = mix(vec3(0.24, 0.21, 0.09), vec3(0.10, 0.24, 0.05), uGreen);
+  colB = mix(colB, vec3(0.42, 0.26, 0.07), uAutumn);
   vec3 alb = mix(colA, colB, vHue);
   alb *= mix(0.45, 1.05, vT);
 
@@ -515,6 +560,7 @@ void main(){
   vUv = uv;
   vType = aParam.w;
   float scale = aParam.x, yaw = aParam.y, phase = aParam.z;
+  scale *= uBloom;               // flowers bloom in late spring, vanish in winter
   float cy = cos(yaw), sy = sin(yaw);
   vec3 lp = vec3(position.x*cy + position.z*sy, position.y, -position.x*sy + position.z*cy);
   float g = gust(aOffset.xz);
@@ -543,7 +589,7 @@ void main(){
   vec3 alb = vType < 0.33 ? colW : (vType < 0.66 ? colY : colP);
   alb = mix(vec3(0.9, 0.8, 0.2), alb, smoothstep(0.0, 0.35, r));
   float sv = sunVis(vWp.xz) * cloudShadow(vWp.xz);
-  vec3 col = alb * (uSunColor*0.6*sv + uSkyZenith*1.2);
+  vec3 col = alb * (uSunColor*0.6*sv + uSkyZenith*0.7);
   col = applyAtmo(col, vWp);
   gl_FragColor = vec4(col, 1.0);
 }
@@ -986,6 +1032,115 @@ void main(){
   float a = smoothstep(1.0, 0.25, length(c)) * clamp(vA, 0.0, 1.0);
   if (a < 0.02) discard;
   vec3 col = uSkyZenith*1.2 + uSunColor*0.22;
+  gl_FragColor = vec4(col, a);
+}
+`;
+
+// ── Trees: grow in spring, sway in wind, blaze in autumn, recede for winter ─
+export const treeVert = (common, canopy) => /* glsl */`
+${common}
+${canopy ? '#define CANOPY' : ''}
+attribute vec3 aOffset;
+attribute vec4 aParam;   // scale, yaw, seed, stagger delay
+varying vec3 vWp;
+varying vec3 vNrm;
+varying float vSeed;
+varying float vFol;
+void main(){
+  float scale = aParam.x, yaw = aParam.y, seed = aParam.z, dly = aParam.w;
+  // staggered growth: rises through spring, sinks away in late autumn
+  float g = smoothstep(0.25 + dly*0.6, 1.35 + dly*0.5, uSeasonT)
+          * (1.0 - smoothstep(3.40 + dly*0.25, 3.92, uSeasonT));
+  g *= 1.0 + 0.06*sin(min(g*3.14159, 3.14159));   // slight overshoot as it springs up
+  float fol = smoothstep(0.45 + dly*0.6, 1.45 + dly*0.5, uSeasonT)
+            * (1.0 - smoothstep(2.95 + dly*0.3, 3.50 + dly*0.2, uSeasonT));
+  vFol = fol;
+  vSeed = seed;
+  vec3 lp = position;
+  vec3 nl = normal;
+  #ifdef CANOPY
+    float n = (vnoise(lp.xy*2.2 + seed) + vnoise(lp.yz*2.2 + seed*1.7) + vnoise(lp.zx*2.2 + seed*2.3))/3.0;
+    nl = normalize(mix(nl, normalize(lp), 0.55));
+    lp *= (0.62 + 0.60*n) * vec3(0.62, 0.80, 0.62);
+    lp *= 0.25 + 0.75*fol;                         // canopy shrinks as the leaves go
+    lp.y += 1.02;
+    float gw = gust(aOffset.xz);
+    lp.x += gw*gw*0.16*lp.y;                       // canopy leans with the gusts
+  #endif
+  float cy = cos(yaw), sy = sin(yaw);
+  vec3 rp = vec3(lp.x*cy + lp.z*sy, lp.y, -lp.x*sy + lp.z*cy);
+  vec3 rn = vec3(nl.x*cy + nl.z*sy, nl.y, -nl.x*sy + nl.z*cy);
+  vec3 wp = aOffset + rp*scale*g;
+  vWp = wp;
+  vNrm = rn;
+  gl_Position = projectionMatrix * viewMatrix * vec4(wp, 1.0);
+}
+`;
+export const treeFrag = (common, canopy) => /* glsl */`
+${common}
+${canopy ? '#define CANOPY' : ''}
+varying vec3 vWp;
+varying vec3 vNrm;
+varying float vSeed;
+varying float vFol;
+void main(){
+  vec3 toP = vWp - cameraPosition;
+  float dist = length(toP);
+  vec3 vd = toP/max(dist, 0.001);
+  vec3 N = normalize(vNrm);
+  #ifdef CANOPY
+    // foliage thins gracefully as vFol drops
+    if (vnoise(vWp.xz*6.0 + vWp.y*4.0 + vSeed) > 0.12 + vFol*0.95) discard;
+    vec3 green = mix(vec3(0.20, 0.34, 0.09), vec3(0.08, 0.21, 0.05), 0.25 + 0.75*uGreen);
+    green *= 0.8 + 0.4*vnoise(vWp.xz*0.8 + vSeed);
+    vec3 aut = mix(vec3(0.80, 0.52, 0.10), vec3(0.62, 0.18, 0.06), hash12(vec2(vSeed, 3.7)));
+    vec3 alb = mix(green, aut, uAutumn);
+    float sv = sunVis(vWp.xz)*cloudShadow(vWp.xz);
+    float ndl = max(dot(N, uSunDir), 0.0)*0.6 + 0.4;
+    vec3 col = alb * uSunColor * ndl * sv;
+    col += alb * mix(uGroundBounce, uSkyZenith*1.2, 0.7);
+    col += alb * uSunColor * pow(max(dot(vd, uSunDir), 0.0), 4.0) * sv * 0.5;
+  #else
+    vec3 bark = mix(vec3(0.26, 0.21, 0.16), vec3(0.42, 0.38, 0.33),
+                    vnoise(vec2(vWp.y*7.0, atan(N.x, N.z)*2.0) + vSeed));
+    vec3 col = litSurface(bark, N, vWp, vd, 0.04, 0.8, 0.8);
+  #endif
+  col = applyAtmo(col, vWp);
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
+// ── Falling autumn leaves ────────────────────────────────────────────────────
+export const leafVert = (common) => /* glsl */`
+${common}
+attribute float aSeed;
+varying float vA;
+varying float vSeed;
+void main(){
+  vSeed = aSeed;
+  float w = smoothstep(2.95, 3.2, uSeasonT)*(1.0 - smoothstep(3.5, 3.78, uSeasonT));
+  float ph = fract(uTime*0.12 + aSeed*13.0);
+  vec3 p = position;
+  p.y -= ph*ph*3.5 + ph*1.2;
+  p.x += cos(ph*14.0 + aSeed*50.0)*0.5 + uWindDir.x*ph*2.2;
+  p.z += sin(ph*12.0 + aSeed*60.0)*0.5 + uWindDir.y*ph*2.2;
+  vec3 toP = p - cameraPosition;
+  float dist = length(toP);
+  vA = w*(1.0 - ph)*smoothstep(0.0, 0.07, ph)*smoothstep(110.0, 30.0, dist);
+  gl_PointSize = clamp(110.0/max(dist, 1.0), 1.0, 5.0);
+  gl_Position = projectionMatrix * viewMatrix * vec4(p, 1.0);
+}
+`;
+export const leafFrag = (common) => /* glsl */`
+${common}
+varying float vA;
+varying float vSeed;
+void main(){
+  vec2 c = gl_PointCoord*2.0 - 1.0;
+  float a = smoothstep(1.0, 0.4, length(c))*clamp(vA, 0.0, 1.0);
+  if (a < 0.02) discard;
+  vec3 tint = mix(vec3(0.80, 0.50, 0.10), vec3(0.60, 0.16, 0.05), hash12(vec2(vSeed, 1.0)));
+  vec3 col = tint*(uSunColor*0.10 + uSkyZenith*0.8);
   gl_FragColor = vec4(col, a);
 }
 `;

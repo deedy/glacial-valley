@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import * as SH from './shaders.js?v=2';
+import * as SH from './shaders.js?v=3';
 
 // ── Config ───────────────────────────────────────────────────────────────────
 const WATER_Y      = 0.0;
@@ -22,6 +22,10 @@ const SUN_EL = 8.0 * Math.PI/180;
 const SUN_AZ = 10.0 * Math.PI/180;
 const SUN_DIR = new THREE.Vector3(
   Math.cos(SUN_EL)*Math.cos(SUN_AZ), Math.sin(SUN_EL), Math.cos(SUN_EL)*Math.sin(SUN_AZ)
+).normalize();
+const SUN_MORN = SUN_DIR.clone();          // shadow-bake direction: morning
+const SUN_EVE = new THREE.Vector3(         // shadow-bake direction: evening (sun sets down-valley west)
+  Math.cos(SUN_EL)*Math.cos(Math.PI - SUN_AZ), Math.sin(SUN_EL), Math.cos(SUN_EL)*Math.sin(Math.PI - SUN_AZ)
 ).normalize();
 const WIND = new THREE.Vector2(-1.0, -0.18).normalize();
 
@@ -168,12 +172,12 @@ function makeGrid(res, cx, cz, half, lod){
   };
 }
 
-function bakeShadows(grid){
+function bakeShadows(grid, sunDir){
   const { h, res, step } = grid;
   const vis = new Float32Array(res*res).fill(1);
-  const horiz = Math.hypot(SUN_DIR.x, SUN_DIR.z);
-  const dirx = SUN_DIR.x/horiz, dirz = SUN_DIR.z/horiz;
-  const tanEl = SUN_DIR.y/horiz;
+  const horiz = Math.hypot(sunDir.x, sunDir.z);
+  const dirx = sunDir.x/horiz, dirz = sunDir.z/horiz;
+  const tanEl = sunDir.y/horiz;
   const maxD = grid.half*2;
   for (let j=0;j<res;j++){
     for (let i=0;i<res;i++){
@@ -198,11 +202,13 @@ function bakeShadows(grid){
   return vis;
 }
 
-function gridTexture(grid, vis){
+function gridTexture(grid, visM, visE){
   const { res, h } = grid;
-  const data = new Float32Array(res*res*2);
-  for (let i=0;i<res*res;i++){ data[i*2] = h[i]; data[i*2+1] = vis[i]; }
-  const tex = new THREE.DataTexture(data, res, res, THREE.RGFormat, THREE.FloatType);
+  const data = new Float32Array(res*res*4);
+  for (let i=0;i<res*res;i++){
+    data[i*4] = h[i]; data[i*4+1] = visM[i]; data[i*4+2] = visE[i]; data[i*4+3] = 1;
+  }
+  const tex = new THREE.DataTexture(data, res, res, THREE.RGBAFormat, THREE.FloatType);
   tex.magFilter = THREE.LinearFilter;
   tex.minFilter = THREE.LinearFilter;
   tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
@@ -254,14 +260,18 @@ async function init(){
     }
   }
 
-  await tick('tracing first light…', 0.36);
-  const coarseVis = bakeShadows(coarse);
-  await tick('tracing first light…', 0.50);
-  const fineVis = bakeShadows(fine);
+  await tick('tracing morning light…', 0.36);
+  const coarseVisM = bakeShadows(coarse, SUN_MORN);
+  await tick('tracing morning light…', 0.44);
+  const fineVisM = bakeShadows(fine, SUN_MORN);
+  await tick('tracing evening light…', 0.52);
+  const coarseVisE = bakeShadows(coarse, SUN_EVE);
+  await tick('tracing evening light…', 0.58);
+  const fineVisE = bakeShadows(fine, SUN_EVE);
   await tick('settling sediment…', 0.62);
 
-  const texCoarse = gridTexture(coarse, coarseVis);
-  const texFine = gridTexture(fine, fineVis);
+  const texCoarse = gridTexture(coarse, coarseVisM, coarseVisE);
+  const texFine = gridTexture(fine, fineVisM, fineVisE);
 
   // ── renderer / scene ──────────────────────────────────────────────────────
   const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
@@ -290,6 +300,12 @@ async function init(){
     uRegFine:     { value: new THREE.Vector3(fine.cx, fine.cz, fine.half) },
     uWaterY:      { value: WATER_Y },
     uWindDir:     { value: WIND },
+    uVisW:        { value: new THREE.Vector2(1, 0) },
+    uSeasonT:     { value: 0 },
+    uGreen:       { value: 0 },
+    uAutumn:      { value: 0 },
+    uBloom:       { value: 0.35 },
+    uSnowUp:      { value: 0 },
   };
   const withU = (extra) => Object.assign({}, U, extra);
   const COMMON = SH.COMMON;
@@ -566,7 +582,7 @@ async function init(){
               const visHere = (() => {
                 const fx = clamp((x-(fine.cx-fine.half))/fine.step, 0, fine.res-1.01);
                 const fz = clamp((z-(fine.cz-fine.half))/fine.step, 0, fine.res-1.01);
-                return fineVis[(fz|0)*fine.res + (fx|0)];
+                return fineVisM[(fz|0)*fine.res + (fx|0)];
               })();
               if (visHere < 0.45 && irng() < 0.55 && n < MAX_ICE){
                 offsets[n*3]=x + (irng()-0.5)*3;
@@ -792,6 +808,57 @@ async function init(){
     }
   }
 
+  // ── trees: grow through spring, blaze in autumn, recede for winter ────────
+  {
+    const trng = mulberry32(4242);
+    const trees = [];
+    let tries = 0;
+    while (trees.length < 650 && tries++ < 22000){
+      const x = (trng()*2 - 1)*680;
+      const z = 60 + (trng()*2 - 1)*680;
+      if (Math.hypot(x - CAM.x, z - CAM.z) < 14) continue;
+      const y = fine.sample(x, z);
+      if (y < WATER_Y + 0.6 || y > WATER_Y + 55) continue;
+      if (slopeAt(x, z) > 0.38) continue;
+      vnoised(x*0.012 + 5, z*0.012 + 5);
+      if (ND_n < 0.52) continue;   // cluster into groves
+      trees.push({ x, y, z, s: 1.6 + Math.pow(trng(), 1.6)*3.6,
+        yaw: trng()*Math.PI*2, seed: trng()*100, dly: trng() });
+    }
+    const trunkGeo = new THREE.CylinderGeometry(0.035, 0.07, 1.25, 6).translate(0, 0.62, 0);
+    const canopyGeo = new THREE.IcosahedronGeometry(1, 2);
+    for (const [geo, isCanopy] of [[trunkGeo, false], [canopyGeo, true]]){
+      const mat = new THREE.ShaderMaterial({
+        uniforms: withU({}), vertexShader: SH.treeVert(COMMON, isCanopy),
+        fragmentShader: SH.treeFrag(COMMON, isCanopy) });
+      const { mesh, offsets, params } = instanced(geo, trees.length, mat);
+      trees.forEach((tr, i) => {
+        offsets[i*3]=tr.x; offsets[i*3+1]=tr.y - 0.05; offsets[i*3+2]=tr.z;
+        params[i*4]=tr.s; params[i*4+1]=tr.yaw; params[i*4+2]=tr.seed; params[i*4+3]=tr.dly;
+      });
+      scene.add(mesh);
+    }
+    // falling autumn leaves around the canopies
+    const LEAVES = 1400;
+    const lp = new Float32Array(LEAVES*3);
+    const ls = new Float32Array(LEAVES);
+    for (let i = 0; i < LEAVES; i++){
+      const tr = trees[(trng()*trees.length)|0];
+      lp[i*3]   = tr.x + (trng() - 0.5)*tr.s*1.6;
+      lp[i*3+1] = tr.y + tr.s*(0.75 + trng()*0.6);
+      lp[i*3+2] = tr.z + (trng() - 0.5)*tr.s*1.6;
+      ls[i] = trng();
+    }
+    const lgeo = new THREE.BufferGeometry();
+    lgeo.setAttribute('position', new THREE.BufferAttribute(lp, 3));
+    lgeo.setAttribute('aSeed', new THREE.BufferAttribute(ls, 1));
+    const leaves = new THREE.Points(lgeo, new THREE.ShaderMaterial({
+      uniforms: withU({}), vertexShader: SH.leafVert(COMMON), fragmentShader: SH.leafFrag(COMMON),
+      transparent: true, depthWrite: false }));
+    leaves.frustumCulled = false; leaves.renderOrder = 3; leaves.userData.noRefr = true;
+    scene.add(leaves);
+  }
+
   // ── post pipeline ─────────────────────────────────────────────────────────
   const sceneRT = new THREE.WebGLRenderTarget(innerWidth, innerHeight, {
     type: THREE.HalfFloatType, samples: 4 });
@@ -831,7 +898,61 @@ async function init(){
     if (e.code === 'Space' && player.grounded){ player.vy = 7.4; player.grounded = false; }
   });
   addEventListener('keyup', e => { keys[e.code] = false; });
-  window.__dbg = { player, keys, camera, view: () => ({ yaw, pitch }) };
+
+  // ── timelapse: one sun arc = two seasons; full cycle = two days ───────────
+  // day 1: winter sunrise → spring → summer · night 1: summer stars
+  // day 2: summer → autumn (leaves fall) → winter · night 2: winter stars
+  const CYCLE = qs.has('cycle') ? parseFloat(qs.get('cycle')) : 110;
+  let seasonClock = qs.has('tt') ? parseFloat(qs.get('tt')) : CYCLE*0.026; // start at sunrise, like the original scene
+  let timeOn = !qs.has('freeze');
+  addEventListener('keydown', e => { if (e.code === 'KeyP') timeOn = !timeOn; });
+  let exposureBase = 1.15;
+  const _c = new THREE.Vector3();
+  function lerpSet(out, ax, ay, az, bx, by, bz, t){
+    out.set(ax + (bx - ax)*t, ay + (by - ay)*t, az + (bz - az)*t);
+  }
+  function updateDayNight(sc){
+    const T = ((sc/CYCLE) % 1 + 1) % 1;
+    const half = T < 0.5 ? 0 : 1;
+    const local = (T*2) % 1;
+    let p, el, az;
+    if (local < 0.8){ p = local/0.8; el = -4 + 60*Math.sin(Math.PI*p); az = 10 + 160*p; }
+    else { p = (local - 0.8)/0.2; el = -4 - 16*Math.sin(Math.PI*p); az = 170 + 200*p; }
+    const season = half*2 + (local < 0.8 ? Math.min(p*2, 2) : 2);
+
+    const er = el*Math.PI/180, ar = az*Math.PI/180;
+    SUN_DIR.set(Math.cos(er)*Math.cos(ar), Math.sin(er), Math.cos(er)*Math.sin(ar));
+
+    const sinEl = Math.sin(er);
+    const elN = clamp(el/60, 0, 1);
+    const dayF = sstep(-0.05, 0.06, sinEl);
+
+    // blend morning/evening shadow bakes; high sun ≈ unshadowed
+    const lowSun = (1 - sstep(20, 45, el)) * dayF;
+    U.uVisW.value.set(lowSun*(1 - sstep(70, 110, az)), lowSun*sstep(70, 110, az));
+
+    // light palettes: warm at the horizons, neutral at noon, starlit at night
+    lerpSet(_c, 1.0, 0.40, 0.16, 1.0, 0.93, 0.82, sstep(0.06, 0.5, elN));
+    U.uSunColor.value.copy(_c).multiplyScalar(10.5*dayF*(0.55 + 0.42*elN));
+    lerpSet(_c, 0.21, 0.36, 0.65, 0.30, 0.49, 0.85, elN);
+    lerpSet(U.uSkyZenith.value, 0.010, 0.014, 0.030, _c.x, _c.y, _c.z, dayF);
+    lerpSet(_c, 0.46, 0.55, 0.72, 0.58, 0.68, 0.82, elN);
+    lerpSet(U.uHorizonCold.value, 0.014, 0.018, 0.040, _c.x, _c.y, _c.z, dayF);
+    lerpSet(_c, 1.16, 0.55, 0.22, 0.92, 0.88, 0.86, sstep(0.2, 0.6, elN));
+    lerpSet(U.uHorizonWarm.value, 0.030, 0.020, 0.030, _c.x, _c.y, _c.z, dayF);
+    U.uGroundBounce.value.set(0.10, 0.085, 0.07).multiplyScalar(0.12 + 0.88*dayF*(0.4 + 0.6*elN));
+
+    // season curves
+    U.uSeasonT.value = season;
+    U.uGreen.value  = sstep(0.35, 1.35, season)*(1 - sstep(2.45, 3.05, season));
+    U.uAutumn.value = sstep(2.35, 2.95, season)*(1 - sstep(3.55, 3.95, season));
+    U.uBloom.value  = 0.35 + 1.15*sstep(0.8, 1.5, season)*(1 - sstep(2.1, 2.7, season));
+    U.uSnowUp.value = 560*sstep(0.5, 1.6, season)*(1 - sstep(2.5, 3.5, season));
+
+    exposureBase = (1.15 - 0.24*elN*dayF) + 2.1*(1 - dayF);   // eyes adapt: stop down at noon, open at night
+  }
+
+  window.__dbg = { player, keys, camera, view: () => ({ yaw, pitch }), season: () => U.uSeasonT.value };
 
   addEventListener('resize', () => {
     camera.aspect = innerWidth/innerHeight;
@@ -886,6 +1007,8 @@ async function init(){
     lastT = now;
     U.uTime.value = t;
     postMat.uniforms.uT.value = t;
+    if (timeOn) seasonClock += dt;
+    updateDayNight(seasonClock);
 
     // ease the view toward where the mouse points; cursor held near the left or
     // right screen edge keeps rotating, so you can spin a full 360°
@@ -934,9 +1057,9 @@ async function init(){
     camera.lookAt(camera.position.x + fwd.x, camera.position.y + fwd.y, camera.position.z + fwd.z);
     moteCenterU.value.set(player.x, Math.max(player.y, 3.0), player.z);
 
-    // adaptive exposure: stop down as the view turns into the sun
+    // adaptive exposure: stop down toward the sun, open up at night
     const facing = Math.max(fwd.dot(SUN_DIR), 0);
-    const target = 1.15 / (1 + 2.2*Math.pow(facing, 3));
+    const target = exposureBase / (1 + 2.2*Math.pow(facing, 3));
     exposure += (target - exposure) * 0.04;
     postMat.uniforms.uExposure.value = exposure;
 
