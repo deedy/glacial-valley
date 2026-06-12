@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Glacial Valley — Sunrise</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#0a0d13}
+  canvas{display:block}
+  #load{position:fixed;inset:0;display:flex;flex-direction:column;gap:10px;align-items:center;justify-content:center;
+        color:#c8d3e2;font:13px/1.5 ui-monospace,Menlo,monospace;background:#0a0d13;transition:opacity 1.2s;z-index:5}
+  #load .bar{width:240px;height:2px;background:#222a36}
+  #load .bar i{display:block;height:100%;width:0;background:#e8b06a}
+  #hint{position:fixed;left:14px;bottom:12px;color:rgba(220,228,240,.45);font:11px ui-monospace,Menlo,monospace;z-index:4;
+        text-shadow:0 1px 2px rgba(0,0,0,.6);pointer-events:none}
+  #err{position:fixed;left:10px;top:10px;color:#ff8484;font:11px ui-monospace,monospace;white-space:pre-wrap;max-width:92vw;z-index:9}
+</style>
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.min.js" } }
+</script>
+</head>
+<body>
+<div id="load"><div id="loadmsg">forming the valley…</div><div class="bar"><i id="loadbar"></i></div></div>
+<div id="hint">mouse looks — hold cursor at a screen edge to keep turning &nbsp;·&nbsp; WASD move &nbsp;·&nbsp; shift sprint &nbsp;·&nbsp; space jump</div>
+<div id="err"></div>
+<script>
+window.addEventListener('error', e => {
+  document.getElementById('err').textContent += (e.message || e.error) + '\n';
+});
+window.addEventListener('unhandledrejection', e => {
+  document.getElementById('err').textContent += 'promise: ' + (e.reason && e.reason.message || e.reason) + '\n';
+});
+</script>
+<script type="module" src="./main.js?v=2"></script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+# secrets — never commit
+.env
+
+# local renders / captures
+*.mov
+*.mp4
+shot*.png
+chrome.log
+
+# misc
+node_modules/
+__pycache__/
+.DS_Store
