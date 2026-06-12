@@ -1,0 +1,133 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>tree lab</title>
+<style>html,body{margin:0;height:100%;overflow:hidden;background:#202830}canvas{display:block}</style>
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.min.js" } }
+</script>
+</head>
+<body>
+<script type="module">
+import * as THREE from 'three';
+import * as SH from './shaders.js?v=3';
+import { makeTreeGeometry, ARCHETYPES } from './trees.js';
+
+const qs = new URLSearchParams(location.search);
+const SEASON = qs.has('season') ? parseFloat(qs.get('season')) : 2.0;
+const YAW = qs.has('yaw') ? parseFloat(qs.get('yaw')) : 0;
+const DIST = qs.has('dist') ? parseFloat(qs.get('dist')) : 16;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.NoToneMapping;
+renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 500);
+
+// dummy 1x1 heightfield maps: flat ground, fully sunlit
+const flat = new Float32Array([0, 1, 1, 1]);
+const dummy = new THREE.DataTexture(flat, 1, 1, THREE.RGBAFormat, THREE.FloatType);
+dummy.needsUpdate = true;
+
+const sun = new THREE.Vector3(0.72, 0.42, 0.55).normalize();
+const green = Math.min(Math.max((SEASON - 0.35)/(1.35 - 0.35), 0), 1) * (1 - Math.min(Math.max((SEASON - 2.45)/0.6, 0), 1));
+const U = {
+  uTime: { value: 0 },
+  uSunDir: { value: sun },
+  uSunColor: { value: new THREE.Vector3(1.0, 0.9, 0.78).multiplyScalar(9.0) },
+  uSkyZenith: { value: new THREE.Vector3(0.25, 0.42, 0.72) },
+  uHorizonCold: { value: new THREE.Vector3(0.5, 0.6, 0.75) },
+  uHorizonWarm: { value: new THREE.Vector3(0.9, 0.85, 0.8) },
+  uGroundBounce: { value: new THREE.Vector3(0.10, 0.09, 0.07) },
+  uMapCoarse: { value: dummy },
+  uMapFine: { value: dummy },
+  uRegCoarse: { value: new THREE.Vector3(0, 0, 4500) },
+  uRegFine: { value: new THREE.Vector3(0, 0, 760) },
+  uWaterY: { value: -50 },
+  uWindDir: { value: new THREE.Vector2(-1, -0.2).normalize() },
+  uVisW: { value: new THREE.Vector2(1, 0) },
+  uSeasonT: { value: SEASON },
+  uGreen: { value: green },
+  uAutumn: { value: Math.min(Math.max((SEASON - 2.35)/0.6, 0), 1) },
+  uBloom: { value: 1 },
+  uSnowUp: { value: 0 },
+};
+const withU = (extra) => Object.assign({}, U, extra);
+const COMMON = SH.COMMON;
+
+// ground
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(300, 300).rotateX(-Math.PI/2),
+  new THREE.MeshBasicMaterial({ color: 0x202a20 })
+);
+scene.add(ground);
+scene.background = new THREE.Color(0x33414f);
+
+function instanced(baseGeo, count){
+  const geo = new THREE.InstancedBufferGeometry();
+  geo.index = baseGeo.index;
+  geo.attributes = baseGeo.attributes;
+  geo.instanceCount = count;
+  const offsets = new Float32Array(count*3);
+  const params = new Float32Array(count*4);
+  geo.setAttribute('aOffset', new THREE.InstancedBufferAttribute(offsets, 3));
+  geo.setAttribute('aParam', new THREE.InstancedBufferAttribute(params, 4));
+  return { geo, offsets, params };
+}
+
+// row of archetypes up close + a small grove behind
+let rng = 1;
+const rand = () => (rng = (rng*16807) % 2147483647) / 2147483647;
+ARCHETYPES.forEach((A, ai) => {
+  const { woodGeo, leafGeo } = makeTreeGeometry(A.seed, A.P);
+  const N = 9;
+  const woodMat = new THREE.ShaderMaterial({
+    uniforms: withU({ uBarkA: { value: new THREE.Vector3(...A.bark) }, uBarkB: { value: new THREE.Vector3(...A.bark2) } }),
+    vertexShader: SH.treeWoodVert(COMMON), fragmentShader: SH.treeWoodFrag(COMMON) });
+  const leafMat = new THREE.ShaderMaterial({
+    uniforms: withU({}), vertexShader: SH.treeLeafVert(COMMON), fragmentShader: SH.treeLeafFrag(COMMON),
+    side: THREE.DoubleSide });
+  const w = instanced(woodGeo, N), l = instanced(leafGeo, N);
+  for (let i = 0; i < N; i++){
+    const front = i === 0;
+    const x = front ? (ai - 1.5)*7 : (ai - 1.5)*7 + (rand()-0.5)*16;
+    const z = front ? 0 : -14 - rand()*22;
+    for (const t of [w, l]){
+      t.offsets[i*3] = x; t.offsets[i*3+1] = 0; t.offsets[i*3+2] = z;
+      t.params[i*4] = front ? 1 : 0.7 + rand()*0.6;
+      t.params[i*4+1] = rand()*Math.PI*2;
+      t.params[i*4+2] = rand()*100;
+      t.params[i*4+3] = rand()*0.5;
+    }
+  }
+  const wm = new THREE.Mesh(w.geo, woodMat); wm.frustumCulled = false; scene.add(wm);
+  const lm = new THREE.Mesh(l.geo, leafMat); lm.frustumCulled = false; scene.add(lm);
+});
+
+// post: same ACES pipeline as the main scene
+const sceneRT = new THREE.WebGLRenderTarget(innerWidth*renderer.getPixelRatio(), innerHeight*renderer.getPixelRatio(), { type: THREE.HalfFloatType, samples: 4 });
+const postScene = new THREE.Scene();
+const postCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const postMat = new THREE.ShaderMaterial({
+  uniforms: { tScene: { value: sceneRT.texture }, uExposure: { value: 1.0 }, uT: { value: 0 } },
+  vertexShader: SH.postVert, fragmentShader: SH.postFrag, depthTest: false });
+postScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), postMat));
+
+camera.position.set(Math.sin(YAW)*DIST, 3.2, Math.cos(YAW)*DIST);
+camera.lookAt(0, 2.2, 0);
+
+renderer.setAnimationLoop(() => {
+  U.uTime.value = performance.now()/1000;
+  renderer.setRenderTarget(sceneRT);
+  renderer.render(scene, camera);
+  renderer.setRenderTarget(null);
+  renderer.render(postScene, postCam);
+});
+</script>
+</body>
+</html>

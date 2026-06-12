@@ -1036,75 +1036,137 @@ void main(){
 }
 `;
 
-// ── Trees: grow in spring, sway in wind, blaze in autumn, recede for winter ─
-export const treeVert = (common, canopy) => /* glsl */`
+// ── Trees: branching skeletons + leaf cards, seasonal growth/shed ───────────
+// Shared growth curve: rises through spring, sinks away in late autumn.
+const TREE_GROW = /* glsl */`
+float treeGrow(float dly){
+  float g = smoothstep(0.22 + dly*0.55, 1.15 + dly*0.45, uSeasonT)
+          * (1.0 - smoothstep(3.45 + dly*0.25, 3.95, uSeasonT));
+  return g;
+}
+`;
+export const treeWoodVert = (common) => /* glsl */`
 ${common}
-${canopy ? '#define CANOPY' : ''}
+${TREE_GROW}
 attribute vec3 aOffset;
 attribute vec4 aParam;   // scale, yaw, seed, stagger delay
 varying vec3 vWp;
 varying vec3 vNrm;
 varying float vSeed;
-varying float vFol;
 void main(){
   float scale = aParam.x, yaw = aParam.y, seed = aParam.z, dly = aParam.w;
-  // staggered growth: rises through spring, sinks away in late autumn
-  float g = smoothstep(0.25 + dly*0.6, 1.35 + dly*0.5, uSeasonT)
-          * (1.0 - smoothstep(3.40 + dly*0.25, 3.92, uSeasonT));
-  g *= 1.0 + 0.06*sin(min(g*3.14159, 3.14159));   // slight overshoot as it springs up
-  float fol = smoothstep(0.45 + dly*0.6, 1.45 + dly*0.5, uSeasonT)
-            * (1.0 - smoothstep(2.95 + dly*0.3, 3.50 + dly*0.2, uSeasonT));
-  vFol = fol;
+  float g = treeGrow(dly);
   vSeed = seed;
   vec3 lp = position;
-  vec3 nl = normal;
-  #ifdef CANOPY
-    float n = (vnoise(lp.xy*2.2 + seed) + vnoise(lp.yz*2.2 + seed*1.7) + vnoise(lp.zx*2.2 + seed*2.3))/3.0;
-    nl = normalize(mix(nl, normalize(lp), 0.55));
-    lp *= (0.62 + 0.60*n) * vec3(0.62, 0.80, 0.62);
-    lp *= 0.25 + 0.75*fol;                         // canopy shrinks as the leaves go
-    lp.y += 1.02;
-    float gw = gust(aOffset.xz);
-    lp.x += gw*gw*0.16*lp.y;                       // canopy leans with the gusts
-  #endif
+  float gw = gust(aOffset.xz);
+  lp.xz += uWindDir * gw*gw*0.04*lp.y*lp.y/(1.0 + lp.y*0.3);   // trunks lean in gusts
   float cy = cos(yaw), sy = sin(yaw);
   vec3 rp = vec3(lp.x*cy + lp.z*sy, lp.y, -lp.x*sy + lp.z*cy);
-  vec3 rn = vec3(nl.x*cy + nl.z*sy, nl.y, -nl.x*sy + nl.z*cy);
+  vec3 rn = vec3(normal.x*cy + normal.z*sy, normal.y, -normal.x*sy + normal.z*cy);
   vec3 wp = aOffset + rp*scale*g;
-  vWp = wp;
-  vNrm = rn;
+  vWp = wp; vNrm = rn;
   gl_Position = projectionMatrix * viewMatrix * vec4(wp, 1.0);
 }
 `;
-export const treeFrag = (common, canopy) => /* glsl */`
+export const treeWoodFrag = (common) => /* glsl */`
 ${common}
-${canopy ? '#define CANOPY' : ''}
+uniform vec3 uBarkA;
+uniform vec3 uBarkB;
 varying vec3 vWp;
 varying vec3 vNrm;
 varying float vSeed;
-varying float vFol;
 void main(){
   vec3 toP = vWp - cameraPosition;
   float dist = length(toP);
   vec3 vd = toP/max(dist, 0.001);
   vec3 N = normalize(vNrm);
-  #ifdef CANOPY
-    // foliage thins gracefully as vFol drops
-    if (vnoise(vWp.xz*6.0 + vWp.y*4.0 + vSeed) > 0.12 + vFol*0.95) discard;
-    vec3 green = mix(vec3(0.20, 0.34, 0.09), vec3(0.08, 0.21, 0.05), 0.25 + 0.75*uGreen);
-    green *= 0.8 + 0.4*vnoise(vWp.xz*0.8 + vSeed);
-    vec3 aut = mix(vec3(0.80, 0.52, 0.10), vec3(0.62, 0.18, 0.06), hash12(vec2(vSeed, 3.7)));
-    vec3 alb = mix(green, aut, uAutumn);
-    float sv = sunVis(vWp.xz)*cloudShadow(vWp.xz);
-    float ndl = max(dot(N, uSunDir), 0.0)*0.6 + 0.4;
-    vec3 col = alb * uSunColor * ndl * sv;
-    col += alb * mix(uGroundBounce, uSkyZenith*1.2, 0.7);
-    col += alb * uSunColor * pow(max(dot(vd, uSunDir), 0.0), 4.0) * sv * 0.5;
-  #else
-    vec3 bark = mix(vec3(0.26, 0.21, 0.16), vec3(0.42, 0.38, 0.33),
-                    vnoise(vec2(vWp.y*7.0, atan(N.x, N.z)*2.0) + vSeed));
-    vec3 col = litSurface(bark, N, vWp, vd, 0.04, 0.8, 0.8);
-  #endif
+  float strp = vnoise(vec2(vWp.y*9.0 + vSeed, atan(N.x, N.z)*1.6));
+  vec3 bark = mix(uBarkA, uBarkB, smoothstep(0.35, 0.75, strp));
+  bark *= 0.85 + 0.30*vnoise(vWp.xz*14.0 + vSeed);
+  vec3 col = litSurface(bark, N, vWp, vd, 0.03, 0.85, 0.75);
+  col = applyAtmo(col, vWp);
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+export const treeLeafVert = (common) => /* glsl */`
+${common}
+${TREE_GROW}
+attribute vec3 aOffset;
+attribute vec4 aParam;
+attribute vec3 aCardC;     // card center (collapse target)
+attribute vec3 aSphereN;   // canopy-sphere shading normal
+attribute vec4 aLeaf;      // hue rand, bud rand, shed rand, flutter phase
+attribute float aOcc;      // 0 deep in the crown → 1 outer shell
+varying vec3 vWp;
+varying vec3 vNrm;
+varying vec3 vSN;
+varying vec2 vUv;
+varying vec4 vLeaf;
+varying float vOcc;
+void main(){
+  float scale = aParam.x, yaw = aParam.y, dly = aParam.w;
+  vLeaf = aLeaf; vUv = uv; vOcc = aOcc;
+  float g = treeGrow(dly);
+  // each card buds after its branch exists and sheds on its own schedule —
+  // collapsing to its center, so no popping or screen-space dissolve
+  float bud = smoothstep(0.55 + dly*0.5 + aLeaf.y*0.45, 0.95 + dly*0.5 + aLeaf.y*0.45, uSeasonT);
+  float shed = 1.0 - smoothstep(3.00 + aLeaf.z*0.42, 3.22 + aLeaf.z*0.42, uSeasonT);
+  float cs = bud*shed;
+  vec3 lp = mix(aCardC, position, cs);
+  float gw = gust(aOffset.xz);
+  lp += normal * sin(uTime*(2.5 + aLeaf.w*4.0) + aLeaf.w*40.0) * 0.03 * (0.3 + gw);
+  lp.xz += uWindDir * gw*gw*0.05*lp.y;
+  float cy = cos(yaw), sy = sin(yaw);
+  vec3 rp = vec3(lp.x*cy + lp.z*sy, lp.y, -lp.x*sy + lp.z*cy);
+  vec3 wp = aOffset + rp*scale*g;
+  vWp = wp;
+  vNrm = vec3(normal.x*cy + normal.z*sy, normal.y, -normal.x*sy + normal.z*cy);
+  vSN  = vec3(aSphereN.x*cy + aSphereN.z*sy, aSphereN.y, -aSphereN.x*sy + aSphereN.z*cy);
+  gl_Position = projectionMatrix * viewMatrix * vec4(wp, 1.0);
+}
+`;
+export const treeLeafFrag = (common) => /* glsl */`
+${common}
+varying vec3 vWp;
+varying vec3 vNrm;
+varying vec3 vSN;
+varying vec2 vUv;
+varying vec4 vLeaf;
+varying float vOcc;
+void main(){
+  // procedural leaf-cluster mask: blobby clusters with serrated edges
+  float m = vnoise(vUv*3.5 + vLeaf.w*31.0)*0.50 + vnoise(vUv*8.0 + vLeaf.w*53.0)*0.32
+          + vnoise(vUv*17.0 + vLeaf.w*77.0)*0.18;
+  vec2 cc = vUv*2.0 - 1.0;
+  float env = 1.0 - dot(cc, cc);
+  if (m*env < 0.21) discard;
+
+  vec3 toP = vWp - cameraPosition;
+  float dist = length(toP);
+  vec3 vd = toP/max(dist, 0.001);
+  vec3 N = normalize(vNrm);
+  if (!gl_FrontFacing) N = -N;
+  N = normalize(mix(N, normalize(vSN), 0.65));   // wrap lighting around the crown
+
+  vec3 spring = vec3(0.18, 0.30, 0.075);
+  vec3 summer = vec3(0.050, 0.150, 0.032);
+  vec3 alb = mix(spring, summer, clamp(uGreen*1.3, 0.0, 1.0));
+  vec3 aut = mix(vec3(0.82, 0.55, 0.10), vec3(0.60, 0.16, 0.05), vLeaf.x);
+  float autT = smoothstep(2.30 + vLeaf.x*0.35, 2.85 + vLeaf.x*0.35, uSeasonT);
+  alb = mix(alb, aut, autT);
+  alb *= 0.70 + 0.55*m;                          // depth inside each cluster
+  alb *= 0.72 + 0.56*fract(vLeaf.w*7.0);         // per-card variety
+
+  // crown self-occlusion: inner cards live in shade
+  float crownAO = 0.45 + 0.55*vOcc;
+
+  float sv = sunVis(vWp.xz) * cloudShadow(vWp.xz);
+  float sunSide = max(dot(normalize(vSN), uSunDir), 0.0);
+  float ndl = max(dot(N, uSunDir), 0.0)*0.55 + sunSide*0.45;
+  vec3 col = alb * uSunColor * ndl * crownAO * sv;
+  col += alb * mix(uGroundBounce, uSkyZenith*1.15, N.y*0.5 + 0.5) * crownAO;
+  float back = pow(max(dot(vd, uSunDir), 0.0), 3.0);
+  col += alb * uSunColor * back * sv * (0.25 + 0.55*vOcc);   // rim cards glow when backlit
   col = applyAtmo(col, vWp);
   gl_FragColor = vec4(col, 1.0);
 }

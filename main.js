@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import * as SH from './shaders.js?v=3';
+import * as SH from './shaders.js?v=4';
+import { makeTreeGeometry, ARCHETYPES } from './trees.js?v=4';
 
 // ── Config ───────────────────────────────────────────────────────────────────
 const WATER_Y      = 0.0;
@@ -808,45 +809,80 @@ async function init(){
     }
   }
 
-  // ── trees: grow through spring, blaze in autumn, recede for winter ────────
+  // ── trees: branching archetypes, moisture-sorted, grown per season ───────
+  await tick('seeding forests…', 0.97);
   {
     const trng = mulberry32(4242);
-    const trees = [];
-    let tries = 0;
-    while (trees.length < 650 && tries++ < 22000){
-      const x = (trng()*2 - 1)*680;
-      const z = 60 + (trng()*2 - 1)*680;
-      if (Math.hypot(x - CAM.x, z - CAM.z) < 14) continue;
+    const arch = ARCHETYPES.map(A => ({ ...makeTreeGeometry(A.seed, A.P), A, list: [] }));
+    const [BIRCH, ALDER, WILLOW, SHRUB] = [0, 1, 2, 3];
+
+    let placed = 0, tries = 0;
+    while (placed < 1300 && tries++ < 60000){
+      const x = (trng()*2 - 1)*690;
+      const z = 60 + (trng()*2 - 1)*690;
+      if (Math.hypot(x - CAM.x, z - CAM.z) < 13) continue;
       const y = fine.sample(x, z);
-      if (y < WATER_Y + 0.6 || y > WATER_Y + 55) continue;
-      if (slopeAt(x, z) > 0.38) continue;
+      if (y < WATER_Y + 0.55 || y > WATER_Y + 58) continue;
+      if (slopeAt(x, z) > 0.42) continue;
       vnoised(x*0.012 + 5, z*0.012 + 5);
-      if (ND_n < 0.52) continue;   // cluster into groves
-      trees.push({ x, y, z, s: 1.6 + Math.pow(trng(), 1.6)*3.6,
+      if (ND_n < 0.45) continue;   // groves with meadow gaps
+      const k = y < 2.5 ? (trng() < 0.7 ? WILLOW : ALDER)
+              : y > 14 ? (trng() < 0.75 ? BIRCH : ALDER)
+              : (trng() < 0.5 ? ALDER : BIRCH);
+      arch[k].list.push({ x, y, z, s: 0.7 + Math.pow(trng(), 1.4)*0.75,
+        yaw: trng()*Math.PI*2, seed: trng()*100, dly: trng() });
+      placed++;
+    }
+    // shrub understory, looser and closer to the water
+    tries = 0;
+    while (arch[SHRUB].list.length < 900 && tries++ < 50000){
+      const x = (trng()*2 - 1)*690;
+      const z = 60 + (trng()*2 - 1)*690;
+      if (Math.hypot(x - CAM.x, z - CAM.z) < 6) continue;
+      const y = fine.sample(x, z);
+      if (y < WATER_Y + 0.4 || y > WATER_Y + 35) continue;
+      if (slopeAt(x, z) > 0.45) continue;
+      vnoised(x*0.02 + 9, z*0.02 + 9);
+      if (ND_n < 0.40) continue;
+      arch[SHRUB].list.push({ x, y, z, s: 0.6 + trng()*0.9,
         yaw: trng()*Math.PI*2, seed: trng()*100, dly: trng() });
     }
-    const trunkGeo = new THREE.CylinderGeometry(0.035, 0.07, 1.25, 6).translate(0, 0.62, 0);
-    const canopyGeo = new THREE.IcosahedronGeometry(1, 2);
-    for (const [geo, isCanopy] of [[trunkGeo, false], [canopyGeo, true]]){
-      const mat = new THREE.ShaderMaterial({
-        uniforms: withU({}), vertexShader: SH.treeVert(COMMON, isCanopy),
-        fragmentShader: SH.treeFrag(COMMON, isCanopy) });
-      const { mesh, offsets, params } = instanced(geo, trees.length, mat);
-      trees.forEach((tr, i) => {
-        offsets[i*3]=tr.x; offsets[i*3+1]=tr.y - 0.05; offsets[i*3+2]=tr.z;
-        params[i*4]=tr.s; params[i*4+1]=tr.yaw; params[i*4+2]=tr.seed; params[i*4+3]=tr.dly;
-      });
-      scene.add(mesh);
+
+    for (const a of arch){
+      if (!a.list.length) continue;
+      const woodMat = new THREE.ShaderMaterial({
+        uniforms: withU({
+          uBarkA: { value: new THREE.Vector3(...a.A.bark) },
+          uBarkB: { value: new THREE.Vector3(...a.A.bark2) },
+        }),
+        vertexShader: SH.treeWoodVert(COMMON), fragmentShader: SH.treeWoodFrag(COMMON) });
+      const leafMat = new THREE.ShaderMaterial({
+        uniforms: withU({}), vertexShader: SH.treeLeafVert(COMMON),
+        fragmentShader: SH.treeLeafFrag(COMMON), side: THREE.DoubleSide });
+      for (const [geo, mat] of [[a.woodGeo, woodMat], [a.leafGeo, leafMat]]){
+        const { mesh, offsets, params } = instanced(geo, a.list.length, mat);
+        a.list.forEach((tr, i) => {
+          offsets[i*3]=tr.x; offsets[i*3+1]=tr.y - 0.04; offsets[i*3+2]=tr.z;
+          params[i*4]=tr.s; params[i*4+1]=tr.yaw; params[i*4+2]=tr.seed; params[i*4+3]=tr.dly;
+        });
+        mesh.userData.noRefr = true;
+        scene.add(mesh);
+      }
     }
-    // falling autumn leaves around the canopies
-    const LEAVES = 1400;
+
+    // falling autumn leaves under the deciduous canopies
+    const deciduous = [...arch[BIRCH].list, ...arch[ALDER].list, ...arch[WILLOW].list];
+    const crownYs = [arch[BIRCH].crownY, arch[ALDER].crownY, arch[WILLOW].crownY];
+    const LEAVES = 1600;
     const lp = new Float32Array(LEAVES*3);
     const ls = new Float32Array(LEAVES);
     for (let i = 0; i < LEAVES; i++){
-      const tr = trees[(trng()*trees.length)|0];
-      lp[i*3]   = tr.x + (trng() - 0.5)*tr.s*1.6;
-      lp[i*3+1] = tr.y + tr.s*(0.75 + trng()*0.6);
-      lp[i*3+2] = tr.z + (trng() - 0.5)*tr.s*1.6;
+      const j = (trng()*deciduous.length)|0;
+      const tr = deciduous[j];
+      const cy = crownYs[j < arch[BIRCH].list.length ? 0 : (j < arch[BIRCH].list.length + arch[ALDER].list.length ? 1 : 2)];
+      lp[i*3]   = tr.x + (trng() - 0.5)*2.2*tr.s;
+      lp[i*3+1] = tr.y + cy*tr.s*(0.8 + trng()*0.5);
+      lp[i*3+2] = tr.z + (trng() - 0.5)*2.2*tr.s;
       ls[i] = trng();
     }
     const lgeo = new THREE.BufferGeometry();
