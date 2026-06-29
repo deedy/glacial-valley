@@ -1,7 +1,8 @@
 // Procedural conifers: a straight central leader with whorls of drooping
-// branches swept into tapered tubes, plus needle-spray cards along the twigs.
-// Four evergreen archetypes, each generated once and instanced. Geometry is in
-// tree-local meters with the root at the origin.
+// branches swept into tapered tubes, clothed in flat needle-spray "frond" cards
+// that radiate along each limb (bottlebrush) and are textured as fishbone
+// needle combs in the shader. Four evergreen archetypes, each generated once and
+// instanced. Geometry is in tree-local meters with the root at the origin.
 import * as THREE from 'three';
 
 function mulberry32(seed){
@@ -22,7 +23,7 @@ function orthogonal(v){
 export function makeTreeGeometry(seed, P){
   const rng = mulberry32(seed);
   const wood = { pos: [], nrm: [], idx: [] };
-  const leafCards = [];
+  const leaf = { pos: [], nrm: [], uv: [], cardC: [], sphereN: [], misc: [], occ: [], idx: [] };
 
   function addTube(pts, r0, r1, sides){
     const base = wood.pos.length/3;
@@ -37,7 +38,7 @@ export function makeTreeGeometry(seed, P){
       N = N.clone().sub(tangents[i].clone().multiplyScalar(N.dot(tangents[i]))).normalize();
       const B = new THREE.Vector3().crossVectors(tangents[i], N);
       const t = i/(n-1);
-      const r = Math.max(r0*(1-t) + r1*t, 0.010);
+      const r = Math.max(r0*(1-t) + r1*t, 0.009);
       for (let s = 0; s < sides; s++){
         const a = s/sides*Math.PI*2;
         const rx = N.x*Math.cos(a) + B.x*Math.sin(a);
@@ -68,7 +69,51 @@ export function makeTreeGeometry(seed, P){
       .add(B.multiplyScalar(Math.sin(azim)*Math.sin(polar))).normalize();
   }
 
-  // a branch (and its side twigs) draped with needle sprays
+  // a flat needle-spray card: base at c, extending `len` along `fl`, `wid` across
+  // `fw`, tapering toward the tip. UV.y runs base→tip so the shader draws the comb.
+  function addFrond(c, fl, fw, len, wid, occ, sn, rnd){
+    const base = leaf.pos.length/3;
+    const fn = new THREE.Vector3().crossVectors(fl, fw).normalize();
+    for (const [uu, vv] of [[-1,0],[1,0],[1,1],[-1,1]]){
+      const wfac = wid*0.5*(1.0 - 0.5*vv);
+      const px = c.x + fl.x*vv*len + fw.x*uu*wfac;
+      const py = c.y + fl.y*vv*len + fw.y*uu*wfac;
+      const pz = c.z + fl.z*vv*len + fw.z*uu*wfac;
+      leaf.pos.push(px, py, pz);
+      leaf.nrm.push(fn.x, fn.y, fn.z);
+      leaf.uv.push(uu*0.5 + 0.5, vv);
+      leaf.cardC.push(c.x, c.y, c.z);
+      leaf.sphereN.push(sn.x, sn.y, sn.z);
+      leaf.misc.push(rnd.h, rnd.b, rnd.s, rnd.ph);
+      leaf.occ.push(occ);
+    }
+    leaf.idx.push(base, base+1, base+2, base, base+2, base+3);
+  }
+
+  function clotheBranch(pts, level){
+    // total polyline length, to scale frond count
+    let len = 0;
+    for (let i = 1; i < pts.length; i++) len += pts[i].distanceTo(pts[i-1]);
+    const count = Math.max(3, Math.round(P.frondDensity*len));
+    const around = level === 0 ? 3 : 2;
+    for (let k = 0; k <= count; k++){
+      const t = 0.04 + 0.98*k/count;            // fronds run to the very tip → no bare sticks
+      const c = pointAt(pts, t);
+      const tau = dirAt(pts, t);
+      const fl = tau.clone(); fl.y -= P.frondDroop; fl.normalize();
+      const occ = Math.min(Math.hypot(c.x, c.z)/P.crownR, 1.0);
+      const sn = new THREE.Vector3(c.x, P.crownR*0.4, c.z);
+      if (sn.lengthSq() < 1e-5) sn.set(0, 1, 0); else sn.normalize();
+      const tip = 0.7 + 0.4*(1.0 - t);          // fuller near the limb's base
+      for (let r = 0; r < around; r++){
+        const roll = (r/Math.max(around,1))*Math.PI*2 + rng()*1.4;
+        const fw = orthogonal(fl).applyAxisAngle(fl, roll);
+        addFrond(c, fl, fw, P.frondLen*tip*(0.8 + rng()*0.5), P.frondW*(0.7 + rng()*0.6),
+          occ, sn, { h: rng(), b: rng(), s: rng(), ph: rng() });
+      }
+    }
+  }
+
   function branch(origin, dir, len, rad, level){
     const segs = level === 0 ? 4 : 3;
     const pts = [origin.clone()];
@@ -77,30 +122,20 @@ export function makeTreeGeometry(seed, P){
       d = d.clone();
       d.x += (rng()-0.5)*P.wiggle*0.20;
       d.z += (rng()-0.5)*P.wiggle*0.20;
-      d.y -= P.droop*(0.18 + level*0.10);   // sags more toward the tip and on sub-twigs
+      d.y -= P.droop*(0.16 + level*0.10);   // sags more toward the tip and on sub-twigs
       d.normalize();
       p = p.clone().addScaledVector(d, len/segs);
       pts.push(p.clone());
     }
-    addTube(pts, rad, rad*0.30, level === 0 ? 4 : 3);
-
-    // needle sprays packed along the limb
-    const ncards = Math.max(2, Math.round(P.needleDensity*len));
-    for (let k = 0; k < ncards; k++){
-      const t = 0.12 + 0.86*(k + rng())/ncards;
-      const c = pointAt(pts, t);
-      c.x += (rng()-0.5)*0.16; c.y += (rng()-0.5)*0.12; c.z += (rng()-0.5)*0.16;
-      leafCards.push({ c, size: P.leafSize*(0.7 + rng()*0.6),
-        h: rng(), b: rng(), s: rng(), ph: rng() });
-    }
-
+    addTube(pts, rad, rad*0.28, level === 0 ? 4 : 3);
+    clotheBranch(pts, level);
     if (level < P.levels){
       const kids = P.children + ((rng()*2)|0);
       for (let k = 0; k < kids; k++){
-        const t = 0.25 + 0.65*(k + rng()*0.6)/kids;
+        const t = 0.30 + 0.60*(k + rng()*0.6)/kids;
         const sd = coneDir(dirAt(pts, t), 0.55 + rng()*0.45, k*2.39996 + rng()*1.2);
         sd.y -= P.droop*0.35; sd.normalize();
-        branch(pointAt(pts, t), sd, len*0.52*(0.7 + rng()*0.4), Math.max(rad*0.45, 0.011), level+1);
+        branch(pointAt(pts, t), sd, len*0.52*(0.7 + rng()*0.4), Math.max(rad*0.45, 0.010), level+1);
       }
     }
   }
@@ -120,7 +155,7 @@ export function makeTreeGeometry(seed, P){
       trunk.push(p.clone());
     }
   }
-  addTube(trunk, P.radius, P.radius*0.10, 7);
+  addTube(trunk, P.radius, P.radius*0.08, 7);
 
   // ── whorls of branches, length tapering to a cone silhouette ───────────────
   for (let w = 0; w < P.whorls; w++){
@@ -135,47 +170,21 @@ export function makeTreeGeometry(seed, P){
       const droop = P.droop*(0.5 + (1 - ty)*0.8);           // lower limbs sweep down harder
       const dir = new THREE.Vector3(Math.cos(az), -droop, Math.sin(az)).normalize();
       const len = coneR*(0.85 + rng()*0.4);
-      branch(origin, dir, len, Math.max(P.radius*0.42*(1 - ty*0.5), 0.013), 0);
+      branch(origin, dir, len, Math.max(P.radius*0.32*(1 - ty*0.5), 0.010), 0);
     }
   }
-  // a tuft of needles crowning the spire
-  for (let k = 0; k < 10; k++){
-    const c = pointAt(trunk, 0.93 + rng()*0.06);
-    c.x += (rng()-0.5)*0.18; c.y += rng()*0.22; c.z += (rng()-0.5)*0.18;
-    leafCards.push({ c, size: P.leafSize*(0.6 + rng()*0.5),
-      h: rng(), b: rng(), s: rng(), ph: rng() });
+  // a compact tuft of short fronds finishing the spire (not a flame)
+  for (let k = 0; k < 9; k++){
+    const c = pointAt(trunk, 0.86 + rng()*0.10);
+    const fl = new THREE.Vector3((rng()-0.5)*0.9, 1, (rng()-0.5)*0.9).normalize();
+    const fw = orthogonal(fl).applyAxisAngle(fl, rng()*6.283);
+    const sn = new THREE.Vector3(c.x, P.crownR, c.z);
+    addFrond(c, fl, fw, P.frondLen*(0.32 + rng()*0.22), P.frondW*(0.55 + rng()*0.35),
+      0.9, sn.lengthSq() < 1e-5 ? new THREE.Vector3(0,1,0) : sn.normalize(),
+      { h: rng(), b: rng(), s: rng(), ph: rng() });
   }
 
-  // shading frame: needles shade as if draping a cone — normals point outward
-  // from the trunk axis with a downward bias; occlusion grows toward the core.
   const top = trunk[trunk.length-1].y;
-  let maxR = 0.01;
-  leafCards.forEach(L => { maxR = Math.max(maxR, Math.hypot(L.c.x, L.c.z)); });
-
-  const leaf = { pos: [], nrm: [], uv: [], cardC: [], sphereN: [], misc: [], occ: [], idx: [] };
-  for (const L of leafCards){
-    const base = leaf.pos.length/3;
-    // card stands roughly vertical, face pointing outward from the trunk → a
-    // tall drooping spray rather than a flat broadleaf blob
-    const outward = new THREE.Vector3(L.c.x, 0, L.c.z);
-    if (outward.lengthSq() < 1e-4) outward.set(rng()*2-1, 0, rng()*2-1);
-    const n = outward.normalize();
-    n.x += (rng()-0.5)*0.5; n.z += (rng()-0.5)*0.5; n.y += (rng()-0.5)*0.3; n.normalize();
-    const u = new THREE.Vector3().crossVectors(n, new THREE.Vector3(0, 1, 0)).normalize().multiplyScalar(L.size*0.62);
-    const v = new THREE.Vector3().crossVectors(n, u).normalize().multiplyScalar(L.size*1.45);
-    const sn = new THREE.Vector3(L.c.x, maxR*0.35, L.c.z).normalize();   // outward + slight up
-    const occ = Math.min(Math.hypot(L.c.x, L.c.z)/maxR, 1.0);           // 0 at core → 1 at tips
-    for (const [a, b] of [[-1,-1],[1,-1],[1,1],[-1,1]]){
-      leaf.pos.push(L.c.x + u.x*a + v.x*b, L.c.y + u.y*a + v.y*b, L.c.z + u.z*a + v.z*b);
-      leaf.nrm.push(n.x, n.y, n.z);
-      leaf.uv.push(a*0.5 + 0.5, b*0.5 + 0.5);
-      leaf.cardC.push(L.c.x, L.c.y, L.c.z);
-      leaf.sphereN.push(sn.x, sn.y, sn.z);
-      leaf.misc.push(L.h, L.b, L.s, L.ph);
-      leaf.occ.push(occ);
-    }
-    leaf.idx.push(base, base+1, base+2, base, base+2, base+3);
-  }
 
   const woodGeo = new THREE.BufferGeometry();
   woodGeo.setAttribute('position', new THREE.Float32BufferAttribute(wood.pos, 3));
@@ -192,25 +201,25 @@ export function makeTreeGeometry(seed, P){
   leafGeo.setAttribute('aOcc', new THREE.Float32BufferAttribute(leaf.occ, 1));
   leafGeo.setIndex(leaf.idx);
 
-  return { woodGeo, leafGeo, cards: leafCards.length, crownY: top };
+  return { woodGeo, leafGeo, cards: leaf.idx.length/6, crownY: top };
 }
 
 // Evergreen conifers — sorted spruce/fir up high, pine mid-slope, saplings low.
 export const ARCHETYPES = [
-  { name: 'spruce', seed: 11, bark: [0.30, 0.24, 0.19], bark2: [0.17, 0.13, 0.10],
-    P: { height: 7.2, radius: 0.135, lean: 0.05, wiggle: 0.6,
-         whorls: 14, perWhorl: 6, crownR: 1.95, taper: 0.92, droop: 0.55,
-         levels: 1, children: 2, needleDensity: 4.2, leafSize: 0.34 } },
-  { name: 'fir', seed: 23, bark: [0.34, 0.28, 0.22], bark2: [0.19, 0.15, 0.12],
-    P: { height: 6.4, radius: 0.115, lean: 0.04, wiggle: 0.5,
-         whorls: 13, perWhorl: 7, crownR: 1.55, taper: 1.05, droop: 0.28,
-         levels: 1, children: 2, needleDensity: 4.6, leafSize: 0.30 } },
-  { name: 'pine', seed: 37, bark: [0.40, 0.30, 0.21], bark2: [0.24, 0.17, 0.12],
-    P: { height: 8.3, radius: 0.145, lean: 0.08, wiggle: 0.7,
-         whorls: 9, perWhorl: 6, crownR: 2.25, taper: 1.5, droop: 0.16,
-         levels: 2, children: 3, needleDensity: 3.4, leafSize: 0.36 } },
-  { name: 'sapling', seed: 53, bark: [0.31, 0.25, 0.19], bark2: [0.18, 0.14, 0.11],
-    P: { height: 1.9, radius: 0.05, lean: 0.10, wiggle: 0.8,
-         whorls: 7, perWhorl: 5, crownR: 0.72, taper: 0.95, droop: 0.30,
-         levels: 1, children: 1, needleDensity: 4.0, leafSize: 0.26 } },
+  { name: 'spruce', seed: 11, bark: [0.26, 0.20, 0.16], bark2: [0.14, 0.11, 0.085],
+    P: { height: 7.4, radius: 0.135, lean: 0.04, wiggle: 0.55,
+         whorls: 15, perWhorl: 6, crownR: 1.95, taper: 0.95, droop: 0.6,
+         levels: 1, children: 2, frondDensity: 7.0, frondLen: 0.6, frondW: 0.34, frondDroop: 0.5 } },
+  { name: 'fir', seed: 23, bark: [0.30, 0.24, 0.18], bark2: [0.17, 0.13, 0.10],
+    P: { height: 6.6, radius: 0.115, lean: 0.03, wiggle: 0.45,
+         whorls: 14, perWhorl: 7, crownR: 1.5, taper: 1.1, droop: 0.32,
+         levels: 1, children: 2, frondDensity: 7.5, frondLen: 0.52, frondW: 0.30, frondDroop: 0.28 } },
+  { name: 'pine', seed: 37, bark: [0.34, 0.25, 0.17], bark2: [0.20, 0.14, 0.10],
+    P: { height: 8.6, radius: 0.145, lean: 0.07, wiggle: 0.7,
+         whorls: 11, perWhorl: 7, crownR: 2.3, taper: 1.25, droop: 0.18,
+         levels: 2, children: 3, frondDensity: 7.0, frondLen: 0.80, frondW: 0.34, frondDroop: 0.16 } },
+  { name: 'sapling', seed: 53, bark: [0.27, 0.21, 0.16], bark2: [0.16, 0.12, 0.09],
+    P: { height: 1.95, radius: 0.05, lean: 0.10, wiggle: 0.8,
+         whorls: 8, perWhorl: 5, crownR: 0.72, taper: 1.0, droop: 0.34,
+         levels: 1, children: 1, frondDensity: 7.0, frondLen: 0.4, frondW: 0.24, frondDroop: 0.34 } },
 ];

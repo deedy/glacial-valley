@@ -1,6 +1,6 @@
 import * as THREE from 'three';
-import * as SH from './shaders.js?v=5';
-import { makeTreeGeometry, ARCHETYPES } from './trees.js?v=5';
+import * as SH from './shaders.js?v=7';
+import { makeTreeGeometry, ARCHETYPES } from './trees.js?v=7';
 
 // ── Config ───────────────────────────────────────────────────────────────────
 const WATER_Y      = 0.0;
