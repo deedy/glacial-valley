@@ -5,6 +5,8 @@
 *.mov
 *.mp4
 shot*.png
+m_*.png
+t_*.png
 chrome.log
 
 # misc

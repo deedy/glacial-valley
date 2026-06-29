@@ -1107,12 +1107,9 @@ void main(){
   float scale = aParam.x, yaw = aParam.y, dly = aParam.w;
   vLeaf = aLeaf; vUv = uv; vOcc = aOcc;
   float g = treeGrow(dly);
-  // each card buds after its branch exists and sheds on its own schedule —
-  // collapsing to its center, so no popping or screen-space dissolve
-  float bud = smoothstep(0.55 + dly*0.5 + aLeaf.y*0.45, 0.95 + dly*0.5 + aLeaf.y*0.45, uSeasonT);
-  float shed = 1.0 - smoothstep(3.00 + aLeaf.z*0.42, 3.22 + aLeaf.z*0.42, uSeasonT);
-  float cs = bud*shed;
-  vec3 lp = mix(aCardC, position, cs);
+  // evergreen: needle sprays are always present — they simply scale in with the
+  // tree's growth (g), never budding late or shedding in autumn
+  vec3 lp = position;
   float gw = gust(aOffset.xz);
   lp += normal * sin(uTime*(2.5 + aLeaf.w*4.0) + aLeaf.w*40.0) * 0.03 * (0.3 + gw);
   lp.xz += uWindDir * gw*gw*0.05*lp.y;
@@ -1134,39 +1131,68 @@ varying vec2 vUv;
 varying vec4 vLeaf;
 varying float vOcc;
 void main(){
-  // procedural leaf-cluster mask: blobby clusters with serrated edges
-  float m = vnoise(vUv*3.5 + vLeaf.w*31.0)*0.50 + vnoise(vUv*8.0 + vLeaf.w*53.0)*0.32
-          + vnoise(vUv*17.0 + vLeaf.w*77.0)*0.18;
-  vec2 cc = vUv*2.0 - 1.0;
-  float env = 1.0 - dot(cc, cc);
-  if (m*env < 0.21) discard;
-
   vec3 toP = vWp - cameraPosition;
   float dist = length(toP);
   vec3 vd = toP/max(dist, 0.001);
+
+  // ── procedural needle frond: a fishbone of paired needles angling up-and-out
+  // from a central rachis, the whole spray tapering from a broad base to a point
+  float t  = vUv.y;                    // 0 base → 1 tip of the spray
+  float xc = vUv.x - 0.5;              // signed offset from the rachis
+  float ax = abs(xc);
+  float hw = 0.47*pow(max(1.0 - t, 0.0), 0.62);          // envelope half-width
+  if (ax > hw) discard;
+
+  // chevron coordinate: constant along a single needle → fract() makes the comb.
+  // needles soften with distance so the comb dissolves into a solid frond (LOD)
+  float jit = vnoise(vec2(t*7.0, vLeaf.w*23.0))*0.012;
+  float slope = 1.55;
+  float comb = (t - slope*ax)/0.070 + jit*30.0;          // needle index along rachis
+  float barb = abs(fract(comb) - 0.5);                   // 0 at a needle centre
+  float aaw  = clamp(dist*0.004, 0.02, 0.34);
+  float needle = smoothstep(0.5, 0.5 - 0.16 - aaw, barb);
+  needle *= smoothstep(hw, hw*0.55, ax) + 0.25;          // fuller near the rachis
+  float stem = smoothstep(0.030, 0.0, ax)*smoothstep(1.0, 0.86, t);
+  float dens = 0.62 + 0.5*vnoise(vUv*vec2(5.0, 16.0) + vLeaf.w*17.0);
+  float m = clamp(max(stem, needle)*dens, 0.0, 1.0);
+  if (m < 0.32) discard;
+
   vec3 N = normalize(vNrm);
   if (!gl_FrontFacing) N = -N;
-  N = normalize(mix(N, normalize(vSN), 0.65));   // wrap lighting around the crown
+  N = normalize(mix(N, normalize(vSN), 0.42));   // blend card normal with crown wrap
 
-  vec3 spring = vec3(0.18, 0.30, 0.075);
-  vec3 summer = vec3(0.050, 0.150, 0.032);
-  vec3 alb = mix(spring, summer, clamp(uGreen*1.3, 0.0, 1.0));
-  vec3 aut = mix(vec3(0.82, 0.55, 0.10), vec3(0.60, 0.16, 0.05), vLeaf.x);
-  float autT = smoothstep(2.30 + vLeaf.x*0.35, 2.85 + vLeaf.x*0.35, uSeasonT);
-  alb = mix(alb, aut, autT);
-  alb *= 0.70 + 0.55*m;                          // depth inside each cluster
-  alb *= 0.72 + 0.56*fract(vLeaf.w*7.0);         // per-card variety
+  // evergreen palette: deep blue-greens in the shade, fresh growth at the tips
+  vec3 deep = vec3(0.022, 0.050, 0.032);
+  vec3 mid  = vec3(0.046, 0.090, 0.048);
+  vec3 lit  = vec3(0.085, 0.140, 0.066);
+  vec3 alb = mix(deep, mid, vOcc);
+  alb = mix(alb, lit, smoothstep(0.55, 1.0, t)*0.42);               // new growth on frond tips
+  alb = mix(alb, alb*vec3(1.2, 1.32, 0.78) + vec3(0.015, 0.025, 0.0),
+            clamp(uGreen, 0.0, 1.0)*0.45);                           // spring flush
+  alb *= 0.80 + 0.42*fract(vLeaf.x*7.0 + vLeaf.z);                   // per-frond variation
+  alb *= 0.72 + 0.28*m;                                             // self-shadow within the spray
 
-  // crown self-occlusion: inner cards live in shade
-  float crownAO = 0.45 + 0.55*vOcc;
+  // winter: snow loads the up-facing sprays
+  float winter = max(1.0 - smoothstep(0.0, 1.05, uSeasonT), smoothstep(3.05, 3.95, uSeasonT));
+  float snow = winter*smoothstep(0.02, 0.5, N.y)*(0.35 + 0.65*vOcc);
+  alb = mix(alb, vec3(0.93, 0.95, 1.0), clamp(snow, 0.0, 0.9));
 
-  float sv = sunVis(vWp.xz) * cloudShadow(vWp.xz);
-  float sunSide = max(dot(normalize(vSN), uSunDir), 0.0);
-  float ndl = max(dot(N, uSunDir), 0.0)*0.55 + sunSide*0.45;
-  vec3 col = alb * uSunColor * ndl * crownAO * sv;
-  col += alb * mix(uGroundBounce, uSkyZenith*1.15, N.y*0.5 + 0.5) * crownAO;
-  float back = pow(max(dot(vd, uSunDir), 0.0), 3.0);
-  col += alb * uSunColor * back * sv * (0.25 + 0.55*vOcc);   // rim cards glow when backlit
+  float crownAO = 0.30 + 0.70*vOcc;                                  // interior of the crown is dark
+
+  float sv  = sunVis(vWp.xz)*cloudShadow(vWp.xz);
+  float ndl = max(dot(N, uSunDir), 0.0);
+  float diff = mix(ndl, ndl*0.5 + 0.5, 0.55);                        // soft wrap diffuse
+  vec3 col = alb*uSunColor*diff*crownAO*sv;
+  col += alb*mix(uGroundBounce, uSkyZenith*1.1, N.y*0.5 + 0.5)*crownAO;   // sky + ground fill
+
+  // transmission: thin needles glow when backlit by a low sun
+  float trans = pow(max(dot(vd, uSunDir), 0.0), 2.4);
+  col += alb*uSunColor*trans*sv*(0.55 + 0.9*vOcc)*1.5;
+
+  // waxy cuticle sheen — a cool fresnel rim that reads as needle gloss
+  float fres = pow(1.0 - max(dot(N, -vd), 0.0), 4.0);
+  col += uSkyZenith*fres*0.16*crownAO*sv;
+
   col = applyAtmo(col, vWp);
   gl_FragColor = vec4(col, 1.0);
 }

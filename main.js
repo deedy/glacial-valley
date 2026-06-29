@@ -1,6 +1,6 @@
 import * as THREE from 'three';
-import * as SH from './shaders.js?v=4';
-import { makeTreeGeometry, ARCHETYPES } from './trees.js?v=4';
+import * as SH from './shaders.js?v=8';
+import { makeTreeGeometry, ARCHETYPES } from './trees.js?v=7';
 
 // ── Config ───────────────────────────────────────────────────────────────────
 const WATER_Y      = 0.0;
@@ -814,7 +814,7 @@ async function init(){
   {
     const trng = mulberry32(4242);
     const arch = ARCHETYPES.map(A => ({ ...makeTreeGeometry(A.seed, A.P), A, list: [] }));
-    const [BIRCH, ALDER, WILLOW, SHRUB] = [0, 1, 2, 3];
+    const [SPRUCE, FIR, PINE, SAPLING] = [0, 1, 2, 3];
 
     let placed = 0, tries = 0;
     while (placed < 1300 && tries++ < 60000){
@@ -826,16 +826,16 @@ async function init(){
       if (slopeAt(x, z) > 0.42) continue;
       vnoised(x*0.012 + 5, z*0.012 + 5);
       if (ND_n < 0.45) continue;   // groves with meadow gaps
-      const k = y < 2.5 ? (trng() < 0.7 ? WILLOW : ALDER)
-              : y > 14 ? (trng() < 0.75 ? BIRCH : ALDER)
-              : (trng() < 0.5 ? ALDER : BIRCH);
+      const k = y < 2.5 ? (trng() < 0.6 ? PINE : FIR)               // valley floor
+              : y > 14 ? (trng() < 0.6 ? SPRUCE : FIR)              // subalpine slopes
+              : (trng() < 0.5 ? PINE : SPRUCE);                     // mid elevation
       arch[k].list.push({ x, y, z, s: 0.7 + Math.pow(trng(), 1.4)*0.75,
         yaw: trng()*Math.PI*2, seed: trng()*100, dly: trng() });
       placed++;
     }
-    // shrub understory, looser and closer to the water
+    // sapling understory, looser and closer to the water
     tries = 0;
-    while (arch[SHRUB].list.length < 900 && tries++ < 50000){
+    while (arch[SAPLING].list.length < 900 && tries++ < 50000){
       const x = (trng()*2 - 1)*690;
       const z = 60 + (trng()*2 - 1)*690;
       if (Math.hypot(x - CAM.x, z - CAM.z) < 6) continue;
@@ -844,7 +844,7 @@ async function init(){
       if (slopeAt(x, z) > 0.45) continue;
       vnoised(x*0.02 + 9, z*0.02 + 9);
       if (ND_n < 0.40) continue;
-      arch[SHRUB].list.push({ x, y, z, s: 0.6 + trng()*0.9,
+      arch[SAPLING].list.push({ x, y, z, s: 0.6 + trng()*0.9,
         yaw: trng()*Math.PI*2, seed: trng()*100, dly: trng() });
     }
 
@@ -870,29 +870,7 @@ async function init(){
       }
     }
 
-    // falling autumn leaves under the deciduous canopies
-    const deciduous = [...arch[BIRCH].list, ...arch[ALDER].list, ...arch[WILLOW].list];
-    const crownYs = [arch[BIRCH].crownY, arch[ALDER].crownY, arch[WILLOW].crownY];
-    const LEAVES = 1600;
-    const lp = new Float32Array(LEAVES*3);
-    const ls = new Float32Array(LEAVES);
-    for (let i = 0; i < LEAVES; i++){
-      const j = (trng()*deciduous.length)|0;
-      const tr = deciduous[j];
-      const cy = crownYs[j < arch[BIRCH].list.length ? 0 : (j < arch[BIRCH].list.length + arch[ALDER].list.length ? 1 : 2)];
-      lp[i*3]   = tr.x + (trng() - 0.5)*2.2*tr.s;
-      lp[i*3+1] = tr.y + cy*tr.s*(0.8 + trng()*0.5);
-      lp[i*3+2] = tr.z + (trng() - 0.5)*2.2*tr.s;
-      ls[i] = trng();
-    }
-    const lgeo = new THREE.BufferGeometry();
-    lgeo.setAttribute('position', new THREE.BufferAttribute(lp, 3));
-    lgeo.setAttribute('aSeed', new THREE.BufferAttribute(ls, 1));
-    const leaves = new THREE.Points(lgeo, new THREE.ShaderMaterial({
-      uniforms: withU({}), vertexShader: SH.leafVert(COMMON), fragmentShader: SH.leafFrag(COMMON),
-      transparent: true, depthWrite: false }));
-    leaves.frustumCulled = false; leaves.renderOrder = 3; leaves.userData.noRefr = true;
-    scene.add(leaves);
+    // evergreen conifers: no autumn leaf-fall — needles persist through winter
   }
 
   // ── post pipeline ─────────────────────────────────────────────────────────
