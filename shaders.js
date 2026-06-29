@@ -1107,12 +1107,9 @@ void main(){
   float scale = aParam.x, yaw = aParam.y, dly = aParam.w;
   vLeaf = aLeaf; vUv = uv; vOcc = aOcc;
   float g = treeGrow(dly);
-  // each card buds after its branch exists and sheds on its own schedule —
-  // collapsing to its center, so no popping or screen-space dissolve
-  float bud = smoothstep(0.55 + dly*0.5 + aLeaf.y*0.45, 0.95 + dly*0.5 + aLeaf.y*0.45, uSeasonT);
-  float shed = 1.0 - smoothstep(3.00 + aLeaf.z*0.42, 3.22 + aLeaf.z*0.42, uSeasonT);
-  float cs = bud*shed;
-  vec3 lp = mix(aCardC, position, cs);
+  // evergreen: needle sprays are always present — they simply scale in with the
+  // tree's growth (g), never budding late or shedding in autumn
+  vec3 lp = position;
   float gw = gust(aOffset.xz);
   lp += normal * sin(uTime*(2.5 + aLeaf.w*4.0) + aLeaf.w*40.0) * 0.03 * (0.3 + gw);
   lp.xz += uWindDir * gw*gw*0.05*lp.y;
@@ -1134,12 +1131,14 @@ varying vec2 vUv;
 varying vec4 vLeaf;
 varying float vOcc;
 void main(){
-  // procedural leaf-cluster mask: blobby clusters with serrated edges
-  float m = vnoise(vUv*3.5 + vLeaf.w*31.0)*0.50 + vnoise(vUv*8.0 + vLeaf.w*53.0)*0.32
-          + vnoise(vUv*17.0 + vLeaf.w*77.0)*0.18;
+  // needle-spray mask: fine filaments down a central spine, fuller at the base
+  // of the spray and feathering to a soft tip
   vec2 cc = vUv*2.0 - 1.0;
-  float env = 1.0 - dot(cc, cc);
-  if (m*env < 0.21) discard;
+  float spine = 1.0 - abs(cc.x);
+  float filament = 0.5 + 0.5*sin((vUv.x*2.0 - 1.0)*22.0 + vLeaf.w*40.0);
+  float along = smoothstep(1.0, -0.65, cc.y);
+  float m = spine*along*(0.55 + 0.45*filament) + vnoise(vUv*7.0 + vLeaf.w*31.0)*0.16;
+  if (m < 0.34) discard;
 
   vec3 toP = vWp - cameraPosition;
   float dist = length(toP);
@@ -1148,16 +1147,19 @@ void main(){
   if (!gl_FrontFacing) N = -N;
   N = normalize(mix(N, normalize(vSN), 0.65));   // wrap lighting around the crown
 
-  vec3 spring = vec3(0.18, 0.30, 0.075);
-  vec3 summer = vec3(0.050, 0.150, 0.032);
-  vec3 alb = mix(spring, summer, clamp(uGreen*1.3, 0.0, 1.0));
-  vec3 aut = mix(vec3(0.82, 0.55, 0.10), vec3(0.60, 0.16, 0.05), vLeaf.x);
-  float autT = smoothstep(2.30 + vLeaf.x*0.35, 2.85 + vLeaf.x*0.35, uSeasonT);
-  alb = mix(alb, aut, autT);
-  alb *= 0.70 + 0.55*m;                          // depth inside each cluster
-  alb *= 0.72 + 0.56*fract(vLeaf.w*7.0);         // per-card variety
+  // evergreen needle palette: deep blue-greens, a little fresh growth in spring
+  vec3 dark  = vec3(0.035, 0.085, 0.050);
+  vec3 fresh = vec3(0.090, 0.180, 0.072);
+  vec3 alb = mix(dark, fresh, clamp(uGreen*0.9, 0.0, 1.0)*(0.4 + 0.6*vOcc));
+  alb *= 0.78 + 0.50*m;                          // depth within each spray
+  alb *= 0.80 + 0.40*fract(vLeaf.w*7.0);         // per-card variety
 
-  // crown self-occlusion: inner cards live in shade
+  // winter: snow settles on the up-facing needle sprays
+  float winter = max(1.0 - smoothstep(0.0, 1.05, uSeasonT), smoothstep(3.05, 3.95, uSeasonT));
+  float snow = winter*smoothstep(0.05, 0.55, N.y)*(0.35 + 0.65*vOcc);
+  alb = mix(alb, vec3(0.92, 0.95, 1.0), clamp(snow, 0.0, 0.85));
+
+  // crown self-occlusion: inner needles live in shade
   float crownAO = 0.45 + 0.55*vOcc;
 
   float sv = sunVis(vWp.xz) * cloudShadow(vWp.xz);
