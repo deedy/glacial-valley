@@ -1169,7 +1169,7 @@ void main(){
   alb = mix(alb, lit, smoothstep(0.55, 1.0, t)*0.42);               // new growth on frond tips
   alb = mix(alb, alb*vec3(1.2, 1.32, 0.78) + vec3(0.015, 0.025, 0.0),
             clamp(uGreen, 0.0, 1.0)*0.45);                           // spring flush
-  alb *= 0.80 + 0.42*fract(vLeaf.x*7.0 + vLeaf.s);                   // per-frond variation
+  alb *= 0.80 + 0.42*fract(vLeaf.x*7.0 + vLeaf.z);                   // per-frond variation
   alb *= 0.72 + 0.28*m;                                             // self-shadow within the spray
 
   // winter: snow loads the up-facing sprays

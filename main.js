@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import * as SH from './shaders.js?v=7';
+import * as SH from './shaders.js?v=8';
 import { makeTreeGeometry, ARCHETYPES } from './trees.js?v=7';
 
 // ── Config ───────────────────────────────────────────────────────────────────
