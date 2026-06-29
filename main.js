@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import * as SH from './shaders.js?v=8';
+import * as SH from './shaders.js?v=9';
 import { makeTreeGeometry, ARCHETYPES } from './trees.js?v=7';
 
 // ── Config ───────────────────────────────────────────────────────────────────
@@ -261,6 +261,51 @@ async function init(){
     }
   }
 
+  // ── a lush island in the river, stamped before the shadow bake so it casts ──
+  // shadows and the water rings it. HEAD/crossD/ISL are reused by the bridge.
+  const HEAD = { x: Math.cos(-0.28), z: Math.sin(-0.28) };       // camera's down-river look
+  let crossD = 42;                                               // distance to the near waterline
+  for (let d = 8; d < 170; d += 1.5){
+    const x = CAM.x + HEAD.x*d, z = CAM.z + HEAD.z*d;
+    if (Math.abs(x) > FINE_HALF-90 || Math.abs(z-60) > FINE_HALF-90) break;
+    if (fine.sample(x, z) < WATER_Y - 0.05){ crossD = d; break; }
+  }
+  const ISL = { x: CAM.x + HEAD.x*(crossD+33), z: CAM.z + HEAD.z*(crossD+33), R: 9.5, H: 2.7 };
+  {
+    const Rout = ISL.R*1.65;
+    const i0 = Math.max(0, Math.floor((ISL.x - Rout - (fine.cx-fine.half))/fine.step));
+    const i1 = Math.min(fine.res-1, Math.ceil((ISL.x + Rout - (fine.cx-fine.half))/fine.step));
+    const j0 = Math.max(0, Math.floor((ISL.z - Rout - (fine.cz-fine.half))/fine.step));
+    const j1 = Math.min(fine.res-1, Math.ceil((ISL.z + Rout - (fine.cz-fine.half))/fine.step));
+    for (let j=j0;j<=j1;j++) for (let i=i0;i<=i1;i++){
+      const px = fine.cx - fine.half + i*fine.step;
+      const pz = fine.cz - fine.half + j*fine.step;
+      const dx = px - ISL.x, dz = pz - ISL.z;
+      const d = Math.hypot(dx, dz);
+      const ang = Math.atan2(dz, dx);
+      const Reff = ISL.R*(0.82 + 0.26*Math.sin(ang*3.0 + Math.sin(ang*2.0 + 1.0)));   // organic outline
+      const idx = j*fine.res+i;
+      if (d < Reff){
+        vnoised(px*0.18+3, pz*0.18+3);
+        const dome = ISL.H*(1.0 - sstep(0.45, 1.0, d/Reff)) + (ND_n-0.5)*0.5;          // flat-topped mound
+        const h = WATER_Y + Math.max(dome, 0.15);
+        if (h > fine.h[idx]) fine.h[idx] = h;
+      } else if (d < Rout){
+        const u = (d - Reff)/(Rout - Reff);
+        const moat = WATER_Y - 0.15 - 1.0*Math.min(u, 1.0);                            // water rings the island
+        if (moat < fine.h[idx]) fine.h[idx] = moat;
+      }
+    }
+    // a few mossy boulders perched on the island (rendered with the boulder batch)
+    const ib = mulberry32(7);
+    for (let k=0;k<5;k++){
+      const a = ib()*Math.PI*2, rr = ISL.R*(0.15 + ib()*0.5);
+      const x = ISL.x + Math.cos(a)*rr, z = ISL.z + Math.sin(a)*rr;
+      boulders.push({ x, z, y: fine.sample(x, z), s: 0.4 + ib()*1.1,
+        yaw: ib()*Math.PI*2, seed: ib()*100, flat: 0.6 + ib()*0.4 });
+    }
+  }
+
   await tick('tracing morning light…', 0.36);
   const coarseVisM = bakeShadows(coarse, SUN_MORN);
   await tick('tracing morning light…', 0.44);
@@ -307,6 +352,7 @@ async function init(){
     uAutumn:      { value: 0 },
     uBloom:       { value: 0.35 },
     uSnowUp:      { value: 0 },
+    uLush:        { value: 0 },
   };
   const withU = (extra) => Object.assign({}, U, extra);
   const COMMON = SH.COMMON;
@@ -871,6 +917,214 @@ async function init(){
     }
 
     // evergreen conifers: no autumn leaf-fall — needles persist through winter
+  }
+
+  // ── the lush island: dense grass, ferns and flowers, all forced vivid green ─
+  await tick('greening the island…', 0.985);
+  {
+    const irng = mulberry32(20240628);
+    // scatter `count` instances over the island disc, calling place(i,x,y,z)
+    function scatter(count, tries, yMin, place){
+      let n = 0, t = 0;
+      while (n < count && t++ < tries){
+        const a = irng()*Math.PI*2, rr = Math.pow(irng(), 0.7)*ISL.R*1.04;
+        const x = ISL.x + Math.cos(a)*rr, z = ISL.z + Math.sin(a)*rr;
+        const y = fine.sample(x, z);
+        if (y < WATER_Y + yMin) continue;
+        if (slopeAt(x, z) > 0.9) continue;
+        place(n, x, y, z); n++;
+      }
+      return n;
+    }
+
+    // tall lush grass
+    {
+      const segs = 3, w0 = 0.05, bp = [], bn = [], bi = [];
+      for (let s=0;s<=segs;s++){ const t=s/segs, w=w0*(1-t*0.85); bp.push(-w,t,0, w,t,0); bn.push(0,0,1, 0,0,1); }
+      for (let s=0;s<segs;s++){ const a=s*2; bi.push(a,a+1,a+2, a+1,a+3,a+2); }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(bp), 3));
+      g.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(bn), 3));
+      g.setIndex(bi);
+      const mat = new THREE.ShaderMaterial({ uniforms: withU({ uLush: { value: 1 } }),
+        vertexShader: SH.grassVert(COMMON), fragmentShader: SH.grassFrag(COMMON), side: THREE.DoubleSide });
+      const { mesh, offsets, params } = instanced(g, 16000, mat);
+      const n = scatter(16000, 200000, 0.16, (i,x,y,z) => {
+        offsets[i*3]=x; offsets[i*3+1]=y-0.01; offsets[i*3+2]=z;
+        params[i*4]=0.22+irng()*0.42; params[i*4+1]=irng()*Math.PI*2; params[i*4+2]=irng()*20; params[i*4+3]=irng();
+      });
+      mesh.geometry.instanceCount = n; mesh.userData.noRefr = true; scene.add(mesh);
+    }
+    // arching ferns
+    {
+      const g = new THREE.PlaneGeometry(1, 1).translate(0, 0.5, 0);
+      const mat = new THREE.ShaderMaterial({ uniforms: withU({ uLush: { value: 1 } }),
+        vertexShader: SH.fernVert(COMMON), fragmentShader: SH.fernFrag(COMMON), side: THREE.DoubleSide });
+      const { mesh, offsets, params } = instanced(g, 1000, mat);
+      const n = scatter(1000, 40000, 0.2, (i,x,y,z) => {
+        offsets[i*3]=x; offsets[i*3+1]=y; offsets[i*3+2]=z;
+        params[i*4]=1.0+irng()*1.2; params[i*4+1]=irng()*Math.PI*2; params[i*4+2]=irng()*20; params[i*4+3]=0.35+irng()*0.65;
+      });
+      mesh.geometry.instanceCount = n; mesh.userData.noRefr = true; scene.add(mesh);
+    }
+    // wildflowers for colour
+    {
+      const g = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI/2).translate(0, 1.0, 0);
+      const mat = new THREE.ShaderMaterial({ uniforms: withU({}),
+        vertexShader: SH.flowerVert(COMMON), fragmentShader: SH.flowerFrag(COMMON), side: THREE.DoubleSide });
+      const { mesh, offsets, params } = instanced(g, 500, mat);
+      const n = scatter(500, 20000, 0.22, (i,x,y,z) => {
+        offsets[i*3]=x; offsets[i*3+1]=y; offsets[i*3+2]=z;
+        params[i*4]=0.06+irng()*0.07; params[i*4+1]=irng()*Math.PI*2; params[i*4+2]=irng()*20; params[i*4+3]=irng();
+      });
+      mesh.geometry.instanceCount = n; mesh.userData.noRefr = true; scene.add(mesh);
+    }
+  }
+
+  // ── the rickety plank bridge: shore → out across the water → onto the island ─
+  await tick('lashing the bridge…', 0.99);
+  {
+    const bpos = [], bnrm = [], bwood = [], bidx = [];
+    const V = THREE.Vector3;
+    // an oriented box: centre c, with three half-extent vectors hx,hy,hz
+    function addBox(c, hx, hy, hz, seed, kind){
+      const faces = [[hx,hy,hz],[hx.clone().negate(),hz,hy],[hy,hz,hx],
+                     [hy.clone().negate(),hx,hz],[hz,hx,hy],[hz.clone().negate(),hy,hx]];
+      for (const [nv,uv,vv] of faces){
+        const nn = nv.clone().normalize();
+        const base = bpos.length/3;
+        for (const [su,sv] of [[-1,-1],[1,-1],[1,1],[-1,1]]){
+          const p = c.clone().add(nv).addScaledVector(uv, su).addScaledVector(vv, sv);
+          bpos.push(p.x,p.y,p.z); bnrm.push(nn.x,nn.y,nn.z); bwood.push(seed, kind);
+        }
+        bidx.push(base,base+1,base+2, base,base+2,base+3);
+      }
+    }
+
+    const brng = mulberry32(8888);
+    const head = new THREE.Vector2(HEAD.x, HEAD.z).normalize();
+    const perp = new THREE.Vector2(-head.y, head.x);
+    const dShore = crossD - 3;                       // anchored on the near bank
+    const dEnd   = crossD + 33 - ISL.R*0.5;          // lands just onto the island
+    const span   = Math.max(dEnd - dShore, 12);
+    const HALFW  = 1.05;                             // deck half-width
+    const ptAt = (d, lat) => {
+      const x = CAM.x + head.x*d + perp.x*lat;
+      const z = CAM.z + head.y*d + perp.y*lat;
+      return { x, z };
+    };
+    const shoreP = ptAt(dShore, 0);
+    const shoreY = fine.sample(shoreP.x, shoreP.z);
+    const endP = ptAt(dEnd, 0);
+    const endY = fine.sample(endP.x, endP.z);
+    const deckAt = (u) => {
+      const d = dShore + span*u;
+      const lat = 0.45*Math.sin(u*7.0 + 1.3) + 0.25*Math.sin(u*3.0);   // rickety lateral wander
+      const p = ptAt(d, lat);
+      const ground = fine.sample(p.x, p.z);
+      const arc = lerp(shoreY + 0.35, endY + 0.25, u) - 0.55*Math.sin(Math.PI*u);  // gentle sag
+      const y = Math.max(arc, WATER_Y + 0.75, ground + 0.06);
+      return { x: p.x, y, z: p.z };
+    };
+
+    // deck centreline samples → tangents
+    const NSEG = Math.max(18, Math.round(span/0.55));
+    const path = [];
+    for (let s=0;s<=NSEG;s++) path.push(deckAt(s/NSEG));
+    const tangentAt = (s) => {
+      const a = path[Math.max(0,s-1)], b = path[Math.min(NSEG,s+1)];
+      return new V(b.x-a.x, b.y-a.y, b.z-a.z).normalize();
+    };
+
+    // two side stringer beams running the length
+    for (const side of [-1, 1]){
+      for (let s=0;s<NSEG;s++){
+        const a = path[s], b = path[s+1];
+        const fwd = new V(b.x-a.x, b.y-a.y, b.z-a.z);
+        const segLen = fwd.length(); fwd.normalize();
+        const right = new V().crossVectors(new V(0,1,0), fwd).normalize();
+        const up = new V().crossVectors(fwd, right).normalize();
+        const cx = (a.x+b.x)/2 + right.x*side*HALFW;
+        const cy = (a.y+b.y)/2 - 0.12 + right.y*side*HALFW;
+        const cz = (a.z+b.z)/2 + right.z*side*HALFW;
+        addBox(new V(cx,cy,cz), fwd.clone().multiplyScalar(segLen*0.5),
+          up.clone().multiplyScalar(0.085), right.clone().multiplyScalar(0.05), brng()*9.0, 0);
+      }
+    }
+
+    // cross planks, some tilted, a few missing → rickety
+    const NPLANK = Math.round(span/0.42);
+    for (let k=0;k<NPLANK;k++){
+      if (brng() < 0.07) continue;                  // a missing plank
+      const u = (k+0.5)/NPLANK;
+      const s = Math.min(NSEG, Math.round(u*NSEG));
+      const c = deckAt(u);
+      const fwd = tangentAt(s);
+      let right = new V().crossVectors(new V(0,1,0), fwd).normalize();
+      let up = new V().crossVectors(fwd, right).normalize();
+      const roll = (brng()-0.5)*0.18, tip = (brng()-0.5)*0.12;       // each plank sits crooked
+      up.applyAxisAngle(fwd, roll).normalize();
+      right.applyAxisAngle(fwd, roll).normalize();
+      const fwd2 = fwd.clone().applyAxisAngle(right, tip).normalize();
+      const cy = c.y + (brng()-0.5)*0.04;
+      addBox(new V(c.x, cy, c.z),
+        right.clone().multiplyScalar(HALFW + 0.12),
+        up.clone().multiplyScalar(0.035),
+        fwd2.clone().multiplyScalar(0.17*(0.8 + brng()*0.4)), brng()*9.0, 0);
+    }
+
+    // posts + rope handrails at intervals
+    const railPts = { '-1': [], '1': [] };
+    const POSTS = Math.max(3, Math.round(span/3.4));
+    for (let pI=0; pI<=POSTS; pI++){
+      const u = pI/POSTS;
+      const s = Math.min(NSEG, Math.round(u*NSEG));
+      const c = deckAt(u);
+      const fwd = tangentAt(s);
+      const right = new V().crossVectors(new V(0,1,0), fwd).normalize();
+      for (const side of [-1, 1]){
+        const ex = c.x + right.x*side*HALFW, ez = c.z + right.z*side*HALFW;
+        const bed = fine.sample(ex, ez);
+        const top = c.y + 0.92 + brng()*0.22;       // uneven post heights
+        const bot = Math.min(bed - 0.3, c.y - 0.2);
+        const lean = new V((brng()-0.5)*0.12, 1, (brng()-0.5)*0.12).normalize();  // posts lean
+        const mid = new V((ex+ex)/2 + lean.x*0.1, (top+bot)/2, (ez+ez)/2 + lean.z*0.1);
+        addBox(mid, new V(0.06,0,0), lean.clone().multiplyScalar((top-bot)/2), new V(0,0,0.06), brng()*9.0, 1);
+        railPts[side].push(new V(ex, top, ez));
+      }
+    }
+    // rope rails sag between post tops
+    for (const side of [-1, 1]){
+      const pts = railPts[side];
+      for (let i=0;i<pts.length-1;i++){
+        const a = pts[i], b = pts[i+1];
+        const SUB = 5;
+        let prev = a.clone();
+        for (let q=1;q<=SUB;q++){
+          const tt = q/SUB;
+          const sag = Math.sin(Math.PI*tt)*0.28;     // catenary droop
+          const cur = a.clone().lerp(b, tt); cur.y -= sag;
+          const mid = prev.clone().lerp(cur, 0.5);
+          const dir = cur.clone().sub(prev); const L = dir.length(); dir.normalize();
+          const right = new V().crossVectors(new V(0,1,0), dir).normalize();
+          const up = new V().crossVectors(dir, right).normalize();
+          addBox(mid, dir.clone().multiplyScalar(L*0.5),
+            up.clone().multiplyScalar(0.028), right.clone().multiplyScalar(0.028), brng()*9.0, 2);
+          prev = cur;
+        }
+      }
+    }
+
+    const bgeo = new THREE.BufferGeometry();
+    bgeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(bpos), 3));
+    bgeo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(bnrm), 3));
+    bgeo.setAttribute('aWood', new THREE.BufferAttribute(new Float32Array(bwood), 2));
+    bgeo.setIndex(bidx);
+    const bmat = new THREE.ShaderMaterial({ uniforms: withU({}),
+      vertexShader: SH.bridgeVert, fragmentShader: SH.bridgeFrag(COMMON), side: THREE.DoubleSide });
+    const bridge = new THREE.Mesh(bgeo, bmat);
+    bridge.frustumCulled = false;
+    scene.add(bridge);
   }
 
   // ── post pipeline ─────────────────────────────────────────────────────────

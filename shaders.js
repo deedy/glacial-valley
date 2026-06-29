@@ -21,6 +21,7 @@ uniform float uGreen;           // lushness 0..1
 uniform float uAutumn;          // autumn coloring 0..1
 uniform float uBloom;           // wildflower bloom factor
 uniform float uSnowUp;          // how far the snowline has retreated uphill (m)
+uniform float uLush;            // 0 normal · 1 forced vivid evergreen lushness (the island)
 
 float hash12(vec2 p){
   vec3 p3 = fract(vec3(p.xyx) * 0.1031);
@@ -486,7 +487,7 @@ varying float vHue;
 varying float vG;
 void main(){
   float scale = aParam.x, yaw = aParam.y, phase = aParam.z;
-  scale *= 1.0 + 0.45*uGreen;     // lusher, taller in summer
+  scale *= 1.0 + 0.45*uGreen + 0.9*uLush;     // lusher, taller in summer; tallest on the island
   vHue = aParam.w;
   float cy = cos(yaw), sy = sin(yaw);
   vec3 lp = vec3(position.x*cy, position.y, -position.x*sy);
@@ -531,10 +532,13 @@ void main(){
   vec3 colB = mix(vec3(0.24, 0.21, 0.09), vec3(0.10, 0.24, 0.05), uGreen);
   colB = mix(colB, vec3(0.42, 0.26, 0.07), uAutumn);
   vec3 alb = mix(colA, colB, vHue);
+  // the island stays vivid green whatever the season
+  vec3 lush = mix(vec3(0.045, 0.20, 0.030), vec3(0.10, 0.34, 0.06), vHue);
+  alb = mix(alb, lush, uLush);
   alb *= mix(0.45, 1.05, vT);
 
   float svRaw = sunVis(vWp.xz);
-  float frost = (1.0 - smoothstep(0.15, 0.45, svRaw)) * smoothstep(0.55, 1.0, vT) * 0.55;
+  float frost = (1.0 - smoothstep(0.15, 0.45, svRaw)) * smoothstep(0.55, 1.0, vT) * 0.55 * (1.0 - uLush);
   alb = mix(alb, vec3(0.55, 0.60, 0.68), frost);
 
   float sv = svRaw * cloudShadow(vWp.xz);
@@ -915,6 +919,126 @@ void main(){
   float wetM = 1.0 - smoothstep(0.02, 0.35, relH);
   alb *= 1.0 - 0.5*wetM;
   vec3 col = litSurface(alb, N, vWp, vd, 0.06 + wetM*0.4, mix(0.8, 0.3, wetM), 0.8);
+  col = applyAtmo(col, vWp);
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
+// ── Rickety bridge: weathered planks, posts and rope rails ───────────────────
+// Geometry is authored in world space (model matrix = identity). aWood.x is a
+// per-piece grain seed; aWood.y is the kind: 0 plank/beam, 1 post, 2 rope.
+export const bridgeVert = /* glsl */`
+attribute vec2 aWood;
+varying vec3 vWp;
+varying vec3 vNrm;
+varying vec2 vWood;
+void main(){
+  vWp = position;
+  vNrm = normalize(normal);
+  vWood = aWood;
+  gl_Position = projectionMatrix * viewMatrix * vec4(position, 1.0);
+}
+`;
+export const bridgeFrag = (common) => /* glsl */`
+${common}
+varying vec3 vWp;
+varying vec3 vNrm;
+varying vec2 vWood;
+void main(){
+  vec3 toP = vWp - cameraPosition;
+  float dist = length(toP);
+  vec3 vd = toP / max(dist, 0.001);
+  vec3 N = normalize(vNrm);
+  if (!gl_FrontFacing) N = -N;
+  float seed = vWood.x;
+  float kind = vWood.y;
+
+  // lengthwise plank grain plus knots; each piece offset by its seed
+  float grain = fbm(vec2((vWp.x + vWp.z)*1.4 + seed*7.0, vWp.y*9.0 + seed*3.0));
+  float fibre = 0.5 + 0.5*sin((vWp.x*5.7 + vWp.z*5.7 + seed*40.0) + grain*5.0);
+  vec3 alb = mix(vec3(0.20, 0.135, 0.082), vec3(0.40, 0.30, 0.19), grain);
+  alb = mix(alb, vec3(0.52, 0.49, 0.43), smoothstep(0.62, 0.95, grain)*0.55); // silvered, weathered
+  alb *= 0.78 + 0.30*fibre;
+
+  if (kind > 1.5){                         // rope rails — pale frayed cord
+    alb = mix(vec3(0.40, 0.34, 0.22), vec3(0.58, 0.52, 0.39), fibre);
+  }
+
+  // damp + mossy near the waterline
+  float relH = vWp.y - uWaterY;
+  float wetM = 1.0 - smoothstep(0.05, 0.7, relH);
+  float moss = smoothstep(0.35, 0.0, relH)*smoothstep(0.45, 0.7, grain)*step(0.2, N.y);
+  alb *= 1.0 - 0.45*wetM;
+  alb = mix(alb, vec3(0.06, 0.16, 0.05), clamp(moss*0.8 + uLush*0.12*step(0.3,N.y)*smoothstep(1.5,0.2,relH), 0.0, 0.8));
+
+  float rough = mix(0.85, 0.35, wetM);
+  float spec = (kind > 1.5 ? 0.02 : 0.05) + wetM*0.4;
+  vec3 col = litSurface(alb, N, vWp, vd, spec, rough, 0.82);
+  col = applyAtmo(col, vWp);
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
+// ── Ferns: arching pinnate fronds clustered on the lush island ───────────────
+export const fernVert = (common) => /* glsl */`
+${common}
+attribute vec3 aOffset;
+attribute vec4 aParam;   // scale, yaw, phase, hue
+varying vec2 vUv;
+varying vec3 vWp;
+varying vec3 vNrm;
+varying float vHue;
+void main(){
+  vUv = uv; vHue = aParam.w;
+  float scale = aParam.x*(0.75 + 0.5*uGreen + 0.45*uLush);
+  float yaw = aParam.y, phase = aParam.z;
+  float arch = position.y*position.y;
+  vec3 lp = vec3(position.x*(1.0 - 0.35*position.y), position.y, arch*0.6);  // taper + curl forward
+  float cy = cos(yaw), sy = sin(yaw);
+  vec3 rp = vec3(lp.x*cy + lp.z*sy, lp.y, -lp.x*sy + lp.z*cy);
+  vec3 wp = aOffset + rp*scale;
+  wp.y -= arch*0.5*scale;                  // the frond arches over and droops
+  float g = gust(aOffset.xz);
+  float sway = 0.05 + 0.5*g*g;
+  wp.xz += normalize(uWindDir + 0.3*vec2(sin(phase*5.0), cos(phase*3.0)))
+           * sway * position.y*position.y * scale * (0.7 + 0.3*sin(uTime*2.0 + phase));
+  vNrm = normalize(vec3(-sy, 0.55, cy));
+  vWp = wp;
+  gl_Position = projectionMatrix * viewMatrix * vec4(wp, 1.0);
+}
+`;
+export const fernFrag = (common) => /* glsl */`
+${common}
+varying vec2 vUv;
+varying vec3 vWp;
+varying vec3 vNrm;
+varying float vHue;
+void main(){
+  // lanceolate frond: a rachis with pinnate leaflets, widest near the middle
+  float t = vUv.y;
+  float ax = abs(vUv.x - 0.5);
+  float hw = 0.46*pow(sin(clamp(t, 0.001, 0.999)*3.14159), 0.7) + 0.015;
+  if (ax > hw) discard;
+  float comb = (t - 1.15*ax)/0.085;
+  float barb = abs(fract(comb) - 0.5);
+  float leaflet = smoothstep(0.5, 0.22, barb)*smoothstep(hw, hw*0.35, ax);
+  float rachis = smoothstep(0.035, 0.0, ax)*smoothstep(1.0, 0.9, t);
+  float m = max(rachis, leaflet);
+  if (m < 0.34) discard;
+
+  vec3 toP = vWp - cameraPosition;
+  vec3 vd = toP / max(length(toP), 0.001);
+  vec3 N = normalize(vNrm);
+  if (!gl_FrontFacing) N = -N;
+
+  vec3 alb = mix(vec3(0.035, 0.150, 0.028), vec3(0.105, 0.330, 0.065), vHue);
+  alb *= mix(0.55, 1.05, t);               // darker at the crozier base
+  float sv = sunVis(vWp.xz)*cloudShadow(vWp.xz);
+  float ndl = max(dot(N, uSunDir), 0.0)*0.7 + 0.3;
+  vec3 col = alb*uSunColor*ndl*sv;
+  col += alb*mix(uGroundBounce, uSkyZenith*1.25, 0.7);
+  float back = pow(max(dot(vd, uSunDir), 0.0), 3.0);
+  col += alb*uSunColor*back*sv*0.8;        // translucent backlit fronds
   col = applyAtmo(col, vWp);
   gl_FragColor = vec4(col, 1.0);
 }
