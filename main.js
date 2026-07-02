@@ -1,6 +1,6 @@
 import * as THREE from 'three';
-import * as SH from './shaders.js?v=9';
-import { makeTreeGeometry, ARCHETYPES } from './trees.js?v=7';
+import * as SH from './shaders.js?v=10';
+import { makeTreeGeometry, ARCHETYPES } from './trees.js?v=8';
 
 // ── Config ───────────────────────────────────────────────────────────────────
 const WATER_Y      = 0.0;
@@ -859,14 +859,22 @@ async function init(){
   await tick('seeding forests…', 0.97);
   {
     const trng = mulberry32(4242);
-    const arch = ARCHETYPES.map(A => ({ ...makeTreeGeometry(A.seed, A.P), A, list: [] }));
+    // three geometry LODs per archetype; instances binned by distance from the
+    // camera anchor. Fewer-but-larger fronds at distance keep the silhouette
+    // while cutting the scene's tree triangles ~20×.
+    const arch = ARCHETYPES.map(A => ({
+      A, lods: [0, 1, 2].map(l => makeTreeGeometry(A.seed, A.P, l)), lists: [[], [], []] }));
     const [SPRUCE, FIR, PINE, SAPLING] = [0, 1, 2, 3];
+    const lodOf = (d, small) => small
+      ? (d < 35 ? 0 : d < 120 ? 1 : 2)      // saplings are tiny — demote sooner
+      : (d < 90 ? 0 : d < 260 ? 1 : 2);
 
     let placed = 0, tries = 0;
     while (placed < 1300 && tries++ < 60000){
       const x = (trng()*2 - 1)*690;
       const z = 60 + (trng()*2 - 1)*690;
-      if (Math.hypot(x - CAM.x, z - CAM.z) < 13) continue;
+      const dCam = Math.hypot(x - CAM.x, z - CAM.z);
+      if (dCam < 13) continue;
       const y = fine.sample(x, z);
       if (y < WATER_Y + 0.55 || y > WATER_Y + 58) continue;
       if (slopeAt(x, z) > 0.42) continue;
@@ -875,27 +883,45 @@ async function init(){
       const k = y < 2.5 ? (trng() < 0.6 ? PINE : FIR)               // valley floor
               : y > 14 ? (trng() < 0.6 ? SPRUCE : FIR)              // subalpine slopes
               : (trng() < 0.5 ? PINE : SPRUCE);                     // mid elevation
-      arch[k].list.push({ x, y, z, s: 0.7 + Math.pow(trng(), 1.4)*0.75,
+      arch[k].lists[lodOf(dCam, false)].push({ x, y, z, s: 0.7 + Math.pow(trng(), 1.4)*0.75,
         yaw: trng()*Math.PI*2, seed: trng()*100, dly: trng() });
       placed++;
     }
-    // sapling understory, looser and closer to the water
+    // sapling understory, looser and closer to the water; beyond ~300 m a
+    // two-metre sapling is subpixel, so don't spend instances there
+    let saplings = 0;
     tries = 0;
-    while (arch[SAPLING].list.length < 900 && tries++ < 50000){
+    while (saplings < 900 && tries++ < 50000){
       const x = (trng()*2 - 1)*690;
       const z = 60 + (trng()*2 - 1)*690;
-      if (Math.hypot(x - CAM.x, z - CAM.z) < 6) continue;
+      const dCam = Math.hypot(x - CAM.x, z - CAM.z);
+      if (dCam < 6 || dCam > 300) continue;
       const y = fine.sample(x, z);
       if (y < WATER_Y + 0.4 || y > WATER_Y + 35) continue;
       if (slopeAt(x, z) > 0.45) continue;
       vnoised(x*0.02 + 9, z*0.02 + 9);
       if (ND_n < 0.40) continue;
-      arch[SAPLING].list.push({ x, y, z, s: 0.6 + trng()*0.9,
+      arch[SAPLING].lists[lodOf(dCam, true)].push({ x, y, z, s: 0.6 + trng()*0.9,
         yaw: trng()*Math.PI*2, seed: trng()*100, dly: trng() });
+      saplings++;
+    }
+    // a handful of young evergreens on the lush island's far half, clear of the
+    // bridge landing
+    {
+      const ivg = mulberry32(31);
+      const base = Math.atan2(HEAD.z, HEAD.x);
+      for (let k = 0; k < 4; k++){
+        const a = base + (ivg() - 0.5)*2.2;
+        const rr = ISL.R*(0.30 + ivg()*0.45);
+        const x = ISL.x + Math.cos(a)*rr, z = ISL.z + Math.sin(a)*rr;
+        const y = fine.sample(x, z);
+        if (y < WATER_Y + 0.3) continue;
+        arch[SAPLING].lists[1].push({ x, y, z, s: 1.0 + ivg()*0.8,
+          yaw: ivg()*Math.PI*2, seed: ivg()*100, dly: ivg()*0.3 });
+      }
     }
 
     for (const a of arch){
-      if (!a.list.length) continue;
       const woodMat = new THREE.ShaderMaterial({
         uniforms: withU({
           uBarkA: { value: new THREE.Vector3(...a.A.bark) },
@@ -903,16 +929,21 @@ async function init(){
         }),
         vertexShader: SH.treeWoodVert(COMMON), fragmentShader: SH.treeWoodFrag(COMMON) });
       const leafMat = new THREE.ShaderMaterial({
-        uniforms: withU({}), vertexShader: SH.treeLeafVert(COMMON),
+        uniforms: withU({ uNeedleTint: { value: new THREE.Vector3(...a.A.tint) } }),
+        vertexShader: SH.treeLeafVert(COMMON),
         fragmentShader: SH.treeLeafFrag(COMMON), side: THREE.DoubleSide });
-      for (const [geo, mat] of [[a.woodGeo, woodMat], [a.leafGeo, leafMat]]){
-        const { mesh, offsets, params } = instanced(geo, a.list.length, mat);
-        a.list.forEach((tr, i) => {
-          offsets[i*3]=tr.x; offsets[i*3+1]=tr.y - 0.04; offsets[i*3+2]=tr.z;
-          params[i*4]=tr.s; params[i*4+1]=tr.yaw; params[i*4+2]=tr.seed; params[i*4+3]=tr.dly;
-        });
-        mesh.userData.noRefr = true;
-        scene.add(mesh);
+      for (let l = 0; l < 3; l++){
+        const list = a.lists[l];
+        if (!list.length) continue;
+        for (const [geo, mat] of [[a.lods[l].woodGeo, woodMat], [a.lods[l].leafGeo, leafMat]]){
+          const { mesh, offsets, params } = instanced(geo, list.length, mat);
+          list.forEach((tr, i) => {
+            offsets[i*3]=tr.x; offsets[i*3+1]=tr.y - 0.04; offsets[i*3+2]=tr.z;
+            params[i*4]=tr.s; params[i*4+1]=tr.yaw; params[i*4+2]=tr.seed; params[i*4+3]=tr.dly;
+          });
+          mesh.userData.noRefr = true;
+          scene.add(mesh);
+        }
       }
     }
 
@@ -984,10 +1015,14 @@ async function init(){
   // ── the rickety plank bridge: shore → out across the water → onto the island ─
   await tick('lashing the bridge…', 0.99);
   {
-    const bpos = [], bnrm = [], bwood = [], bidx = [];
+    const bpos = [], bnrm = [], bwood = [], baxs = [], bidx = [];
     const V = THREE.Vector3;
-    // an oriented box: centre c, with three half-extent vectors hx,hy,hz
+    // an oriented box: centre c, with three half-extent vectors hx,hy,hz.
+    // The longest extent is the timber's grain axis, passed to the shader so
+    // fibre runs along each plank/post/rope rather than through it.
     function addBox(c, hx, hy, hz, seed, kind){
+      const axis = [hx, hy, hz].reduce((m, v) => v.lengthSq() > m.lengthSq() ? v : m)
+        .clone().normalize();
       const faces = [[hx,hy,hz],[hx.clone().negate(),hz,hy],[hy,hz,hx],
                      [hy.clone().negate(),hx,hz],[hz,hx,hy],[hz.clone().negate(),hy,hx]];
       for (const [nv,uv,vv] of faces){
@@ -995,7 +1030,8 @@ async function init(){
         const base = bpos.length/3;
         for (const [su,sv] of [[-1,-1],[1,-1],[1,1],[-1,1]]){
           const p = c.clone().add(nv).addScaledVector(uv, su).addScaledVector(vv, sv);
-          bpos.push(p.x,p.y,p.z); bnrm.push(nn.x,nn.y,nn.z); bwood.push(seed, kind);
+          bpos.push(p.x,p.y,p.z); bnrm.push(nn.x,nn.y,nn.z);
+          bwood.push(seed, kind); baxs.push(axis.x, axis.y, axis.z);
         }
         bidx.push(base,base+1,base+2, base,base+2,base+3);
       }
@@ -1119,6 +1155,7 @@ async function init(){
     bgeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(bpos), 3));
     bgeo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(bnrm), 3));
     bgeo.setAttribute('aWood', new THREE.BufferAttribute(new Float32Array(bwood), 2));
+    bgeo.setAttribute('aAxis', new THREE.BufferAttribute(new Float32Array(baxs), 3));
     bgeo.setIndex(bidx);
     const bmat = new THREE.ShaderMaterial({ uniforms: withU({}),
       vertexShader: SH.bridgeVert, fragmentShader: SH.bridgeFrag(COMMON), side: THREE.DoubleSide });
@@ -1264,10 +1301,14 @@ async function init(){
   let lastT = performance.now();
   let bobPhase = 0, bobAmp = 0;
   renderer.setAnimationLoop(() => {
-    if (fpsProbe && ++frames % 120 === 0){
-      const now2 = performance.now();
-      console.log('FPS', (120000/(now2 - fpsT)).toFixed(1));
-      fpsT = now2;
+    if (fpsProbe){
+      frames++;
+      if (frames === 40) console.log('TRIS', renderer.info.render.triangles);
+      if (frames % 120 === 0){
+        const now2 = performance.now();
+        console.log('FPS', (120000/(now2 - fpsT)).toFixed(1));
+        fpsT = now2;
+      }
     }
     const now = performance.now();
     const t = (now - t0)/1000;

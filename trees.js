@@ -1,8 +1,9 @@
 // Procedural conifers: a straight central leader with whorls of drooping
 // branches swept into tapered tubes, clothed in flat needle-spray "frond" cards
 // that radiate along each limb (bottlebrush) and are textured as fishbone
-// needle combs in the shader. Four evergreen archetypes, each generated once and
-// instanced. Geometry is in tree-local meters with the root at the origin.
+// needle combs in the shader. Four evergreen archetypes, each generated at
+// three levels of detail and instanced by distance. Geometry is in tree-local
+// meters with the root at the origin.
 import * as THREE from 'three';
 
 function mulberry32(seed){
@@ -20,8 +21,25 @@ function orthogonal(v){
   return new THREE.Vector3().crossVectors(v, a).normalize();
 }
 
-export function makeTreeGeometry(seed, P){
-  const rng = mulberry32(seed);
+// Quality tiers: as detail drops, fronds get fewer but larger (and the needle
+// comb in the shader softens with distance), so the crown volume reads the
+// same while the triangle count falls by an order of magnitude per tier.
+const LODS = [
+  { dens: 0.62, aroundMain: 2, aroundSub: 2, levelCap: 1, childMul: 1.0,   // hero, < ~90 m
+    whorlMul: 1.0,  perWhorlMul: 1.0,  fLen: 1.35, fWid: 1.55,
+    trunkSides: 6, trunkSegs: 8, branchSides: 3, branchSegs: 3, childSegs: 2, childTubes: true,  spire: 9 },
+  { dens: 0.34, aroundMain: 2, aroundSub: 1, levelCap: 1, childMul: 0.6,   // mid-ground
+    whorlMul: 0.85, perWhorlMul: 0.7,  fLen: 1.8,  fWid: 2.1,
+    trunkSides: 5, trunkSegs: 6, branchSides: 3, branchSegs: 2, childSegs: 2, childTubes: false, spire: 6 },
+  { dens: 0.20, aroundMain: 1, aroundSub: 1, levelCap: 0, childMul: 0,     // distant silhouette
+    whorlMul: 0.7,  perWhorlMul: 0.55, fLen: 2.6,  fWid: 3.1,
+    trunkSides: 4, trunkSegs: 5, branchSides: 3, branchSegs: 2, childSegs: 2, childTubes: false, spire: 4,
+    noLimbTubes: true },                                                   // fronds hide the limbs out here
+];
+
+export function makeTreeGeometry(seed, P, lod = 0){
+  const Q = LODS[lod];
+  const rng = mulberry32(seed + lod*101);
   const wood = { pos: [], nrm: [], idx: [] };
   const leaf = { pos: [], nrm: [], uv: [], cardC: [], sphereN: [], misc: [], occ: [], idx: [] };
 
@@ -94,8 +112,8 @@ export function makeTreeGeometry(seed, P){
     // total polyline length, to scale frond count
     let len = 0;
     for (let i = 1; i < pts.length; i++) len += pts[i].distanceTo(pts[i-1]);
-    const count = Math.max(3, Math.round(P.frondDensity*len));
-    const around = level === 0 ? 3 : 2;
+    const count = Math.max(2, Math.round(P.frondDensity*Q.dens*len));
+    const around = level === 0 ? Q.aroundMain : Q.aroundSub;
     for (let k = 0; k <= count; k++){
       const t = 0.04 + 0.98*k/count;            // fronds run to the very tip → no bare sticks
       const c = pointAt(pts, t);
@@ -108,14 +126,14 @@ export function makeTreeGeometry(seed, P){
       for (let r = 0; r < around; r++){
         const roll = (r/Math.max(around,1))*Math.PI*2 + rng()*1.4;
         const fw = orthogonal(fl).applyAxisAngle(fl, roll);
-        addFrond(c, fl, fw, P.frondLen*tip*(0.8 + rng()*0.5), P.frondW*(0.7 + rng()*0.6),
+        addFrond(c, fl, fw, P.frondLen*Q.fLen*tip*(0.8 + rng()*0.5), P.frondW*Q.fWid*(0.7 + rng()*0.6),
           occ, sn, { h: rng(), b: rng(), s: rng(), ph: rng() });
       }
     }
   }
 
   function branch(origin, dir, len, rad, level){
-    const segs = level === 0 ? 4 : 3;
+    const segs = level === 0 ? Q.branchSegs : Q.childSegs;
     const pts = [origin.clone()];
     let d = dir.clone(), p = origin.clone();
     for (let i = 1; i <= segs; i++){
@@ -127,10 +145,11 @@ export function makeTreeGeometry(seed, P){
       p = p.clone().addScaledVector(d, len/segs);
       pts.push(p.clone());
     }
-    addTube(pts, rad, rad*0.28, level === 0 ? 4 : 3);
+    if (level === 0 ? !Q.noLimbTubes : Q.childTubes) addTube(pts, rad, rad*0.28, level === 0 ? Q.branchSides : 3);
     clotheBranch(pts, level);
-    if (level < P.levels){
-      const kids = P.children + ((rng()*2)|0);
+    const levels = Math.min(P.levels, Q.levelCap);
+    if (level < levels){
+      const kids = Math.round((P.children + ((rng()*2)|0))*Q.childMul);
       for (let k = 0; k < kids; k++){
         const t = 0.30 + 0.60*(k + rng()*0.6)/kids;
         const sd = coneDir(dirAt(pts, t), 0.55 + rng()*0.45, k*2.39996 + rng()*1.2);
@@ -145,7 +164,7 @@ export function makeTreeGeometry(seed, P){
   const trunk = [new THREE.Vector3(0, 0, 0)];
   {
     let p = new THREE.Vector3(0, 0, 0), d = axis.clone();
-    const segs = 8;
+    const segs = Q.trunkSegs;
     for (let i = 1; i <= segs; i++){
       d = d.clone();
       d.x += (rng()-0.5)*P.wiggle*0.05;
@@ -155,15 +174,16 @@ export function makeTreeGeometry(seed, P){
       trunk.push(p.clone());
     }
   }
-  addTube(trunk, P.radius, P.radius*0.08, 7);
+  addTube(trunk, P.radius, P.radius*0.08, Q.trunkSides);
 
   // ── whorls of branches, length tapering to a cone silhouette ───────────────
-  for (let w = 0; w < P.whorls; w++){
-    const ty = (w + 0.6)/P.whorls;                          // height fraction up the leader
+  const whorls = Math.max(3, Math.round(P.whorls*Q.whorlMul));
+  for (let w = 0; w < whorls; w++){
+    const ty = (w + 0.6)/whorls;                            // height fraction up the leader
     const coneR = P.crownR*Math.pow(1 - ty, P.taper);       // cone radius here
     if (coneR < 0.06) continue;
     const origin = pointAt(trunk, Math.min(ty, 0.985));
-    const n = P.perWhorl + ((rng()*2)|0);
+    const n = Math.max(2, Math.round(P.perWhorl*Q.perWhorlMul)) + ((rng()*2)|0);
     const az0 = rng()*Math.PI*2;
     for (let b = 0; b < n; b++){
       const az = az0 + b/n*Math.PI*2 + (rng()-0.5)*0.4;
@@ -174,12 +194,12 @@ export function makeTreeGeometry(seed, P){
     }
   }
   // a compact tuft of short fronds finishing the spire (not a flame)
-  for (let k = 0; k < 9; k++){
+  for (let k = 0; k < Q.spire; k++){
     const c = pointAt(trunk, 0.86 + rng()*0.10);
     const fl = new THREE.Vector3((rng()-0.5)*0.9, 1, (rng()-0.5)*0.9).normalize();
     const fw = orthogonal(fl).applyAxisAngle(fl, rng()*6.283);
     const sn = new THREE.Vector3(c.x, P.crownR, c.z);
-    addFrond(c, fl, fw, P.frondLen*(0.32 + rng()*0.22), P.frondW*(0.55 + rng()*0.35),
+    addFrond(c, fl, fw, P.frondLen*Q.fLen*(0.32 + rng()*0.22), P.frondW*Q.fWid*(0.55 + rng()*0.35),
       0.9, sn.lengthSq() < 1e-5 ? new THREE.Vector3(0,1,0) : sn.normalize(),
       { h: rng(), b: rng(), s: rng(), ph: rng() });
   }
@@ -205,20 +225,25 @@ export function makeTreeGeometry(seed, P){
 }
 
 // Evergreen conifers — sorted spruce/fir up high, pine mid-slope, saplings low.
+// `tint` is a per-species needle colour cast (blue spruce, warm pine …).
 export const ARCHETYPES = [
   { name: 'spruce', seed: 11, bark: [0.26, 0.20, 0.16], bark2: [0.14, 0.11, 0.085],
+    tint: [0.88, 1.02, 1.20],
     P: { height: 7.4, radius: 0.135, lean: 0.04, wiggle: 0.55,
          whorls: 15, perWhorl: 6, crownR: 1.95, taper: 0.95, droop: 0.6,
          levels: 1, children: 2, frondDensity: 7.0, frondLen: 0.6, frondW: 0.34, frondDroop: 0.5 } },
   { name: 'fir', seed: 23, bark: [0.30, 0.24, 0.18], bark2: [0.17, 0.13, 0.10],
+    tint: [1.00, 1.05, 1.00],
     P: { height: 6.6, radius: 0.115, lean: 0.03, wiggle: 0.45,
          whorls: 14, perWhorl: 7, crownR: 1.5, taper: 1.1, droop: 0.32,
          levels: 1, children: 2, frondDensity: 7.5, frondLen: 0.52, frondW: 0.30, frondDroop: 0.28 } },
   { name: 'pine', seed: 37, bark: [0.34, 0.25, 0.17], bark2: [0.20, 0.14, 0.10],
+    tint: [1.16, 1.08, 0.74],
     P: { height: 8.6, radius: 0.145, lean: 0.07, wiggle: 0.7,
          whorls: 11, perWhorl: 7, crownR: 2.3, taper: 1.25, droop: 0.18,
          levels: 2, children: 3, frondDensity: 7.0, frondLen: 0.80, frondW: 0.34, frondDroop: 0.16 } },
   { name: 'sapling', seed: 53, bark: [0.27, 0.21, 0.16], bark2: [0.16, 0.12, 0.09],
+    tint: [1.10, 1.14, 0.86],
     P: { height: 1.95, radius: 0.05, lean: 0.10, wiggle: 0.8,
          whorls: 8, perWhorl: 5, crownR: 0.72, taper: 1.0, droop: 0.34,
          levels: 1, children: 1, frondDensity: 7.0, frondLen: 0.4, frondW: 0.24, frondDroop: 0.34 } },

@@ -532,8 +532,15 @@ void main(){
   vec3 colB = mix(vec3(0.24, 0.21, 0.09), vec3(0.10, 0.24, 0.05), uGreen);
   colB = mix(colB, vec3(0.42, 0.26, 0.07), uAutumn);
   vec3 alb = mix(colA, colB, vHue);
-  // the island stays vivid green whatever the season
+  // meadow-scale mottling: drifts of richer and paler growth
+  float patch = vnoise(vWp.xz*0.13);
+  alb *= 0.85 + 0.30*patch;
+  // the island stays vivid green whatever the season, in mottled drifts with
+  // occasional sun-cured straw tips so the green doesn't read as a flat paint
   vec3 lush = mix(vec3(0.045, 0.20, 0.030), vec3(0.10, 0.34, 0.06), vHue);
+  float ipatch = vnoise(vWp.xz*0.6);
+  lush *= 0.78 + 0.50*ipatch;
+  lush = mix(lush, vec3(0.28, 0.27, 0.09), smoothstep(0.85, 1.0, vT)*0.25*ipatch);
   alb = mix(alb, lush, uLush);
   alb *= mix(0.45, 1.05, vT);
 
@@ -929,13 +936,16 @@ void main(){
 // per-piece grain seed; aWood.y is the kind: 0 plank/beam, 1 post, 2 rope.
 export const bridgeVert = /* glsl */`
 attribute vec2 aWood;
+attribute vec3 aAxis;
 varying vec3 vWp;
 varying vec3 vNrm;
 varying vec2 vWood;
+varying vec3 vAxis;
 void main(){
   vWp = position;
   vNrm = normalize(normal);
   vWood = aWood;
+  vAxis = aAxis;
   gl_Position = projectionMatrix * viewMatrix * vec4(position, 1.0);
 }
 `;
@@ -944,6 +954,7 @@ ${common}
 varying vec3 vWp;
 varying vec3 vNrm;
 varying vec2 vWood;
+varying vec3 vAxis;
 void main(){
   vec3 toP = vWp - cameraPosition;
   float dist = length(toP);
@@ -953,15 +964,33 @@ void main(){
   float seed = vWood.x;
   float kind = vWood.y;
 
-  // lengthwise plank grain plus knots; each piece offset by its seed
-  float grain = fbm(vec2((vWp.x + vWp.z)*1.4 + seed*7.0, vWp.y*9.0 + seed*3.0));
-  float fibre = 0.5 + 0.5*sin((vWp.x*5.7 + vWp.z*5.7 + seed*40.0) + grain*5.0);
-  vec3 alb = mix(vec3(0.20, 0.135, 0.082), vec3(0.40, 0.30, 0.19), grain);
-  alb = mix(alb, vec3(0.52, 0.49, 0.43), smoothstep(0.62, 0.95, grain)*0.55); // silvered, weathered
-  alb *= 0.78 + 0.30*fibre;
+  // timber-space coordinates: u runs along the grain axis of this piece,
+  // pp is the position collapsed onto the ring plane perpendicular to it
+  vec3 A = normalize(vAxis);
+  float u = dot(vWp, A);
+  vec3 pp = vWp - A*u;
+  float v = pp.x + pp.y*1.7 + pp.z*0.6;                 // cheap cross-grain coordinate
 
-  if (kind > 1.5){                         // rope rails — pale frayed cord
-    alb = mix(vec3(0.40, 0.34, 0.22), vec3(0.58, 0.52, 0.39), fibre);
+  // long fibres with slow waviness, split cracks, and a knotty base tone
+  float grain = fbm(vec2(u*1.1 + seed*7.0, v*6.0 + seed*3.0));
+  float fibre = 0.5 + 0.5*sin(v*24.0 + grain*7.0 + seed*40.0);
+  float crack = smoothstep(0.78, 0.96, fbm(vec2(u*0.7 + seed*11.0, v*20.0)));
+  vec3 alb = mix(vec3(0.185, 0.125, 0.075), vec3(0.38, 0.285, 0.175), grain);
+  // sun-bleached silvering where rain and light hit: up-facing surfaces
+  float bleach = smoothstep(0.25, 0.85, N.y)*smoothstep(0.30, 0.85, grain);
+  alb = mix(alb, vec3(0.47, 0.44, 0.385), bleach*0.65);
+  alb *= 0.76 + 0.32*fibre;
+  alb *= 1.0 - 0.50*crack;                              // dark split lines along the grain
+
+  // sawn ends: faces perpendicular to the grain show darker ringed end-grain
+  float endg = smoothstep(0.55, 0.9, abs(dot(N, A)));
+  float rings = 0.5 + 0.5*sin(length(pp)*30.0 + seed*20.0);
+  alb = mix(alb, vec3(0.16, 0.11, 0.065)*(0.8 + 0.4*rings), endg*0.8);
+
+  if (kind > 1.5){                         // rope rails — twisted two-strand cord
+    float tw = 0.5 + 0.5*sin(u*60.0 + vWp.y*8.0 + seed*9.0);
+    alb = mix(vec3(0.34, 0.27, 0.16), vec3(0.55, 0.47, 0.32), tw);
+    alb *= 0.85 + 0.30*fbm(vec2(u*9.0, seed*5.0));      // frayed patches
   }
 
   // damp + mossy near the waterline
@@ -972,8 +1001,8 @@ void main(){
   alb = mix(alb, vec3(0.06, 0.16, 0.05), clamp(moss*0.8 + uLush*0.12*step(0.3,N.y)*smoothstep(1.5,0.2,relH), 0.0, 0.8));
 
   float rough = mix(0.85, 0.35, wetM);
-  float spec = (kind > 1.5 ? 0.02 : 0.05) + wetM*0.4;
-  vec3 col = litSurface(alb, N, vWp, vd, spec, rough, 0.82);
+  float spec = (kind > 1.5 ? 0.02 : 0.05) + wetM*0.4 + endg*0.02;
+  vec3 col = litSurface(alb, N, vWp, vd, spec, rough, 0.82 - 0.25*crack);
   col = applyAtmo(col, vWp);
   gl_FragColor = vec4(col, 1.0);
 }
@@ -1032,7 +1061,9 @@ void main(){
   if (!gl_FrontFacing) N = -N;
 
   vec3 alb = mix(vec3(0.035, 0.150, 0.028), vec3(0.105, 0.330, 0.065), vHue);
+  alb *= 0.75 + 0.50*vnoise(vWp.xz*2.1);   // clump-to-clump variation
   alb *= mix(0.55, 1.05, t);               // darker at the crozier base
+  alb = mix(alb, vec3(0.14, 0.11, 0.045), rachis*(1.0 - leaflet)*0.6);  // woody rachis
   float sv = sunVis(vWp.xz)*cloudShadow(vWp.xz);
   float ndl = max(dot(N, uSunDir), 0.0)*0.7 + 0.3;
   vec3 col = alb*uSunColor*ndl*sv;
@@ -1248,6 +1279,7 @@ void main(){
 `;
 export const treeLeafFrag = (common) => /* glsl */`
 ${common}
+uniform vec3 uNeedleTint;
 varying vec3 vWp;
 varying vec3 vNrm;
 varying vec3 vSN;
@@ -1272,14 +1304,22 @@ void main(){
   float jit = vnoise(vec2(t*7.0, vLeaf.w*23.0))*0.012;
   float slope = 1.55;
   float comb = (t - slope*ax)/0.070 + jit*30.0;          // needle index along rachis
+  float nid  = floor(comb);                              // stable per-needle id
   float barb = abs(fract(comb) - 0.5);                   // 0 at a needle centre
+  // ragged per-needle length → a feathered, broken silhouette instead of a
+  // clean card edge (fades out with distance as the comb itself dissolves)
+  float rag = 0.55 + 0.50*vnoise(vec2(nid*0.83, vLeaf.w*31.0));
+  float reach = mix(rag, 1.0, smoothstep(60.0, 160.0, dist));
+  if (ax > hw*reach + 0.012) discard;
   float aaw  = clamp(dist*0.004, 0.02, 0.34);
   float needle = smoothstep(0.5, 0.5 - 0.16 - aaw, barb);
-  needle *= smoothstep(hw, hw*0.55, ax) + 0.25;          // fuller near the rachis
+  // solid where needles overlap by the rachis, separating into single needles
+  // (with sky gaps between them) toward their tips
+  needle *= 0.30 + 0.80*smoothstep(hw, hw*0.30, ax);
   float stem = smoothstep(0.030, 0.0, ax)*smoothstep(1.0, 0.86, t);
   float dens = 0.62 + 0.5*vnoise(vUv*vec2(5.0, 16.0) + vLeaf.w*17.0);
   float m = clamp(max(stem, needle)*dens, 0.0, 1.0);
-  if (m < 0.32) discard;
+  if (m < 0.30) discard;
 
   vec3 N = normalize(vNrm);
   if (!gl_FrontFacing) N = -N;
@@ -1293,7 +1333,9 @@ void main(){
   alb = mix(alb, lit, smoothstep(0.55, 1.0, t)*0.42);               // new growth on frond tips
   alb = mix(alb, alb*vec3(1.2, 1.32, 0.78) + vec3(0.015, 0.025, 0.0),
             clamp(uGreen, 0.0, 1.0)*0.45);                           // spring flush
+  alb *= uNeedleTint;                                                // species cast: blue spruce, warm pine
   alb *= 0.80 + 0.42*fract(vLeaf.x*7.0 + vLeaf.z);                   // per-frond variation
+  alb *= 0.88 + 0.24*fract(nid*0.618 + vLeaf.w);                     // per-needle sparkle
   alb *= 0.72 + 0.28*m;                                             // self-shadow within the spray
 
   // winter: snow loads the up-facing sprays
