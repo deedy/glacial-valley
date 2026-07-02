@@ -487,7 +487,7 @@ varying float vHue;
 varying float vG;
 void main(){
   float scale = aParam.x, yaw = aParam.y, phase = aParam.z;
-  scale *= 1.0 + 0.45*uGreen + 0.9*uLush;     // lusher, taller in summer; tallest on the island
+  scale *= 1.0 + 0.45*uGreen + 0.5*uLush;     // lusher, taller in summer; taller still on the island
   vHue = aParam.w;
   float cy = cos(yaw), sy = sin(yaw);
   vec3 lp = vec3(position.x*cy, position.y, -position.x*sy);
@@ -537,7 +537,7 @@ void main(){
   alb *= 0.85 + 0.30*patch;
   // the island stays vivid green whatever the season, in mottled drifts with
   // occasional sun-cured straw tips so the green doesn't read as a flat paint
-  vec3 lush = mix(vec3(0.045, 0.20, 0.030), vec3(0.10, 0.34, 0.06), vHue);
+  vec3 lush = mix(vec3(0.035, 0.135, 0.024), vec3(0.075, 0.235, 0.045), vHue);
   float ipatch = vnoise(vWp.xz*0.6);
   lush *= 0.78 + 0.50*ipatch;
   lush = mix(lush, vec3(0.28, 0.27, 0.09), smoothstep(0.85, 1.0, vT)*0.25*ipatch);
@@ -980,6 +980,7 @@ void main(){
   float bleach = smoothstep(0.25, 0.85, N.y)*smoothstep(0.30, 0.85, grain);
   alb = mix(alb, vec3(0.47, 0.44, 0.385), bleach*0.65);
   alb *= 0.76 + 0.32*fibre;
+  alb *= 0.82 + 0.36*fract(seed*0.61);                  // piece-to-piece tone: reads at distance
   alb *= 1.0 - 0.50*crack;                              // dark split lines along the grain
 
   // sawn ends: faces perpendicular to the grain show darker ringed end-grain
@@ -1060,7 +1061,7 @@ void main(){
   vec3 N = normalize(vNrm);
   if (!gl_FrontFacing) N = -N;
 
-  vec3 alb = mix(vec3(0.035, 0.150, 0.028), vec3(0.105, 0.330, 0.065), vHue);
+  vec3 alb = mix(vec3(0.030, 0.125, 0.024), vec3(0.075, 0.240, 0.050), vHue);
   alb *= 0.75 + 0.50*vnoise(vWp.xz*2.1);   // clump-to-clump variation
   alb *= mix(0.55, 1.05, t);               // darker at the crozier base
   alb = mix(alb, vec3(0.14, 0.11, 0.045), rachis*(1.0 - leaflet)*0.6);  // woody rachis
@@ -1258,9 +1259,10 @@ varying vec3 vSN;
 varying vec2 vUv;
 varying vec4 vLeaf;
 varying float vOcc;
+varying float vSeed;
 void main(){
   float scale = aParam.x, yaw = aParam.y, dly = aParam.w;
-  vLeaf = aLeaf; vUv = uv; vOcc = aOcc;
+  vLeaf = aLeaf; vUv = uv; vOcc = aOcc; vSeed = aParam.z;
   float g = treeGrow(dly);
   // evergreen: needle sprays are always present — they simply scale in with the
   // tree's growth (g), never budding late or shedding in autumn
@@ -1286,6 +1288,7 @@ varying vec3 vSN;
 varying vec2 vUv;
 varying vec4 vLeaf;
 varying float vOcc;
+varying float vSeed;
 void main(){
   vec3 toP = vWp - cameraPosition;
   float dist = length(toP);
@@ -1317,7 +1320,7 @@ void main(){
   // (with sky gaps between them) toward their tips
   needle *= 0.30 + 0.80*smoothstep(hw, hw*0.30, ax);
   float stem = smoothstep(0.030, 0.0, ax)*smoothstep(1.0, 0.86, t);
-  float dens = 0.62 + 0.5*vnoise(vUv*vec2(5.0, 16.0) + vLeaf.w*17.0);
+  float dens = 0.74 + 0.42*vnoise(vUv*vec2(5.0, 16.0) + vLeaf.w*17.0);
   float m = clamp(max(stem, needle)*dens, 0.0, 1.0);
   if (m < 0.30) discard;
 
@@ -1325,39 +1328,44 @@ void main(){
   if (!gl_FrontFacing) N = -N;
   N = normalize(mix(N, normalize(vSN), 0.42));   // blend card normal with crown wrap
 
-  // evergreen palette: deep blue-greens in the shade, fresh growth at the tips
-  vec3 deep = vec3(0.022, 0.050, 0.032);
-  vec3 mid  = vec3(0.046, 0.090, 0.048);
-  vec3 lit  = vec3(0.085, 0.140, 0.066);
+  // evergreen palette: dark desaturated forest greens
+  vec3 deep = vec3(0.014, 0.030, 0.017);
+  vec3 mid  = vec3(0.030, 0.062, 0.031);
+  vec3 lit  = vec3(0.062, 0.105, 0.046);
   vec3 alb = mix(deep, mid, vOcc);
   alb = mix(alb, lit, smoothstep(0.55, 1.0, t)*0.42);               // new growth on frond tips
-  alb = mix(alb, alb*vec3(1.2, 1.32, 0.78) + vec3(0.015, 0.025, 0.0),
-            clamp(uGreen, 0.0, 1.0)*0.45);                           // spring flush
+  alb = mix(alb, alb*vec3(1.08, 1.16, 0.88) + vec3(0.004, 0.008, 0.0),
+            clamp(uGreen, 0.0, 1.0)*0.18);                           // spring flush (subtle)
   alb *= uNeedleTint;                                                // species cast: blue spruce, warm pine
-  alb *= 0.80 + 0.42*fract(vLeaf.x*7.0 + vLeaf.z);                   // per-frond variation
-  alb *= 0.88 + 0.24*fract(nid*0.618 + vLeaf.w);                     // per-needle sparkle
+  float th = fract(vSeed*0.731);                                     // per-TREE hue + value scatter
+  alb *= mix(vec3(0.92, 1.0, 1.14), vec3(1.10, 1.04, 0.84), th)
+       * (0.86 + 0.26*fract(vSeed*0.377));
+  alb *= 0.86 + 0.26*fract(vLeaf.x*7.0 + vLeaf.z);                   // per-frond variation
+  alb *= 0.90 + 0.18*fract(nid*0.618 + vLeaf.w);                     // per-needle sparkle
   alb *= 0.72 + 0.28*m;                                             // self-shadow within the spray
 
-  // winter: snow loads the up-facing sprays
+  // winter: snow loads the up-facing sprays (vOcc is now top-weighted → treetops)
   float winter = max(1.0 - smoothstep(0.0, 1.05, uSeasonT), smoothstep(3.05, 3.95, uSeasonT));
   float snow = winter*smoothstep(0.02, 0.5, N.y)*(0.35 + 0.65*vOcc);
   alb = mix(alb, vec3(0.93, 0.95, 1.0), clamp(snow, 0.0, 0.9));
 
-  float crownAO = 0.30 + 0.70*vOcc;                                  // interior of the crown is dark
+  float crownAO = 0.30 + 0.70*vOcc;                                  // lower-inner crown is dark
 
   float sv  = sunVis(vWp.xz)*cloudShadow(vWp.xz);
   float ndl = max(dot(N, uSunDir), 0.0);
-  float diff = mix(ndl, ndl*0.5 + 0.5, 0.55);                        // soft wrap diffuse
+  float diff = mix(ndl, ndl*0.5 + 0.5, 0.30);                        // restore sun/shade modelling
   vec3 col = alb*uSunColor*diff*crownAO*sv;
   col += alb*mix(uGroundBounce, uSkyZenith*1.1, N.y*0.5 + 0.5)*crownAO;   // sky + ground fill
 
-  // transmission: thin needles glow when backlit by a low sun
-  float trans = pow(max(dot(vd, uSunDir), 0.0), 2.4);
-  col += alb*uSunColor*trans*sv*(0.55 + 0.9*vOcc)*1.5;
+  // transmission: a tight backlit rim, glowing only through actual needle mass
+  float trans = pow(max(dot(vd, uSunDir), 0.0), 3.5);
+  col += alb*uSunColor*trans*sv*(0.55 + 0.9*vOcc)*0.85*(0.4 + 0.6*m);
 
-  // waxy cuticle sheen — a cool fresnel rim that reads as needle gloss
-  float fres = pow(1.0 - max(dot(N, -vd), 0.0), 4.0);
-  col += uSkyZenith*fres*0.16*crownAO*sv;
+  // waxy cuticle glint: sun-keyed half-vector sparkle, not a sky film
+  vec3 hv = normalize(uSunDir - vd);
+  col += uSunColor * sv * crownAO * 0.05
+       * pow(max(dot(N, hv), 0.0), 24.0)
+       * (0.04 + 0.96*pow(1.0 - max(dot(N, -vd), 0.0), 5.0));
 
   col = applyAtmo(col, vWp);
   gl_FragColor = vec4(col, 1.0);

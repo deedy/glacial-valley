@@ -25,13 +25,13 @@ function orthogonal(v){
 // comb in the shader softens with distance), so the crown volume reads the
 // same while the triangle count falls by an order of magnitude per tier.
 const LODS = [
-  { dens: 0.62, aroundMain: 2, aroundSub: 2, levelCap: 1, childMul: 1.0,   // hero, < ~90 m
+  { dens: 0.80, aroundMain: 2, aroundSub: 2, levelCap: 1, childMul: 1.0,   // hero, < ~90 m
     whorlMul: 1.0,  perWhorlMul: 1.0,  fLen: 1.35, fWid: 1.55,
     trunkSides: 6, trunkSegs: 8, branchSides: 3, branchSegs: 3, childSegs: 2, childTubes: true,  spire: 9 },
-  { dens: 0.34, aroundMain: 2, aroundSub: 1, levelCap: 1, childMul: 0.6,   // mid-ground
-    whorlMul: 0.85, perWhorlMul: 0.7,  fLen: 1.8,  fWid: 2.1,
+  { dens: 0.46, aroundMain: 2, aroundSub: 1, levelCap: 1, childMul: 0.6,   // mid-ground
+    whorlMul: 0.85, perWhorlMul: 0.7,  fLen: 1.8,  fWid: 2.3,
     trunkSides: 5, trunkSegs: 6, branchSides: 3, branchSegs: 2, childSegs: 2, childTubes: false, spire: 6 },
-  { dens: 0.20, aroundMain: 1, aroundSub: 1, levelCap: 0, childMul: 0,     // distant silhouette
+  { dens: 0.26, aroundMain: 1, aroundSub: 1, levelCap: 0, childMul: 0,     // distant silhouette
     whorlMul: 0.7,  perWhorlMul: 0.55, fLen: 2.6,  fWid: 3.1,
     trunkSides: 4, trunkSegs: 5, branchSides: 3, branchSegs: 2, childSegs: 2, childTubes: false, spire: 4,
     noLimbTubes: true },                                                   // fronds hide the limbs out here
@@ -114,12 +114,18 @@ export function makeTreeGeometry(seed, P, lod = 0){
     for (let i = 1; i < pts.length; i++) len += pts[i].distanceTo(pts[i-1]);
     const count = Math.max(2, Math.round(P.frondDensity*Q.dens*len));
     const around = level === 0 ? Q.aroundMain : Q.aroundSub;
+    const t0 = level === 0 ? 0.16 : 0.05;       // bare inner limb → trunk & structure show through
     for (let k = 0; k <= count; k++){
-      const t = 0.04 + 0.98*k/count;            // fronds run to the very tip → no bare sticks
+      const t = t0 + (1.0 - t0)*k/count;        // …but fronds still run to the very tip
       const c = pointAt(pts, t);
       const tau = dirAt(pts, t);
       const fl = tau.clone(); fl.y -= P.frondDroop; fl.normalize();
-      const occ = Math.min(Math.hypot(c.x, c.z)/P.crownR, 1.0);
+      // occlusion for the shader: cone-local radial term + vertical term, so the
+      // lower-inner crown reads dark and the top-outer shell catches the light
+      const tyc = Math.min(Math.max(c.y/P.height, 0), 1);
+      const coneL = Math.max(P.crownR*Math.pow(1 - tyc, P.taper), 0.35);
+      const radial = Math.min(Math.hypot(c.x, c.z)/coneL, 1.0);
+      const occ = Math.min(Math.max(0.55*radial + 0.45*tyc, 0), 1);
       const sn = new THREE.Vector3(c.x, P.crownR*0.4, c.z);
       if (sn.lengthSq() < 1e-5) sn.set(0, 1, 0); else sn.normalize();
       const tip = 0.7 + 0.4*(1.0 - t);          // fuller near the limb's base
@@ -141,6 +147,7 @@ export function makeTreeGeometry(seed, P, lod = 0){
       d.x += (rng()-0.5)*P.wiggle*0.20;
       d.z += (rng()-0.5)*P.wiggle*0.20;
       d.y -= P.droop*(0.16 + level*0.10);   // sags more toward the tip and on sub-twigs
+      if (i === segs) d.y += (P.upsweep || 0);   // limbs hook up at the very tip
       d.normalize();
       p = p.clone().addScaledVector(d, len/segs);
       pts.push(p.clone());
@@ -178,18 +185,21 @@ export function makeTreeGeometry(seed, P, lod = 0){
 
   // ── whorls of branches, length tapering to a cone silhouette ───────────────
   const whorls = Math.max(3, Math.round(P.whorls*Q.whorlMul));
+  const bare = P.bare || 0;
   for (let w = 0; w < whorls; w++){
     const ty = (w + 0.6)/whorls;                            // height fraction up the leader
+    if (ty < bare*(0.75 + rng()*0.55)) continue;            // self-pruned lower trunk, ragged cutoff
     const coneR = P.crownR*Math.pow(1 - ty, P.taper);       // cone radius here
     if (coneR < 0.06) continue;
     const origin = pointAt(trunk, Math.min(ty, 0.985));
     const n = Math.max(2, Math.round(P.perWhorl*Q.perWhorlMul)) + ((rng()*2)|0);
     const az0 = rng()*Math.PI*2;
+    const wLen = rng() < 0.18 ? 0.62 : 0.88 + rng()*0.22;   // occasional short "gap" whorl
     for (let b = 0; b < n; b++){
       const az = az0 + b/n*Math.PI*2 + (rng()-0.5)*0.4;
       const droop = P.droop*(0.5 + (1 - ty)*0.8);           // lower limbs sweep down harder
       const dir = new THREE.Vector3(Math.cos(az), -droop, Math.sin(az)).normalize();
-      const len = coneR*(0.85 + rng()*0.4);
+      const len = coneR*wLen*(0.94 + rng()*0.12);           // tight per-branch noise → conical outline
       branch(origin, dir, len, Math.max(P.radius*0.32*(1 - ty*0.5), 0.010), 0);
     }
   }
@@ -230,21 +240,21 @@ export const ARCHETYPES = [
   { name: 'spruce', seed: 11, bark: [0.26, 0.20, 0.16], bark2: [0.14, 0.11, 0.085],
     tint: [0.88, 1.02, 1.20],
     P: { height: 7.4, radius: 0.135, lean: 0.04, wiggle: 0.55,
-         whorls: 15, perWhorl: 6, crownR: 1.95, taper: 0.95, droop: 0.6,
-         levels: 1, children: 2, frondDensity: 7.0, frondLen: 0.6, frondW: 0.34, frondDroop: 0.5 } },
+         whorls: 15, perWhorl: 6, crownR: 1.45, taper: 0.80, droop: 0.7, bare: 0.12, upsweep: 0.30,
+         levels: 1, children: 2, frondDensity: 7.0, frondLen: 0.6, frondW: 0.34, frondDroop: 0.62 } },
   { name: 'fir', seed: 23, bark: [0.30, 0.24, 0.18], bark2: [0.17, 0.13, 0.10],
     tint: [1.00, 1.05, 1.00],
     P: { height: 6.6, radius: 0.115, lean: 0.03, wiggle: 0.45,
-         whorls: 14, perWhorl: 7, crownR: 1.5, taper: 1.1, droop: 0.32,
+         whorls: 14, perWhorl: 7, crownR: 1.20, taper: 0.95, droop: 0.32, bare: 0.08, upsweep: 0.18,
          levels: 1, children: 2, frondDensity: 7.5, frondLen: 0.52, frondW: 0.30, frondDroop: 0.28 } },
   { name: 'pine', seed: 37, bark: [0.34, 0.25, 0.17], bark2: [0.20, 0.14, 0.10],
     tint: [1.16, 1.08, 0.74],
     P: { height: 8.6, radius: 0.145, lean: 0.07, wiggle: 0.7,
-         whorls: 11, perWhorl: 7, crownR: 2.3, taper: 1.25, droop: 0.18,
+         whorls: 11, perWhorl: 7, crownR: 2.05, taper: 1.25, droop: 0.18, bare: 0.30, upsweep: 0.10,
          levels: 2, children: 3, frondDensity: 7.0, frondLen: 0.80, frondW: 0.34, frondDroop: 0.16 } },
   { name: 'sapling', seed: 53, bark: [0.27, 0.21, 0.16], bark2: [0.16, 0.12, 0.09],
     tint: [1.10, 1.14, 0.86],
     P: { height: 1.95, radius: 0.05, lean: 0.10, wiggle: 0.8,
-         whorls: 8, perWhorl: 5, crownR: 0.72, taper: 1.0, droop: 0.34,
+         whorls: 8, perWhorl: 5, crownR: 0.62, taper: 1.0, droop: 0.34, bare: 0.0, upsweep: 0.12,
          levels: 1, children: 1, frondDensity: 7.0, frondLen: 0.4, frondW: 0.24, frondDroop: 0.34 } },
 ];
